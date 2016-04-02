@@ -14,6 +14,7 @@ unsigned		nhbins;
 size_t			tcache_maxclass;
 
 tcaches_t		*tcaches;
+ccache_t		**ccaches;
 
 /* Index of first element within tcaches that has never been used. */
 static unsigned		tcaches_past;
@@ -29,79 +30,134 @@ size_t	tcache_salloc(const void *ptr)
 	return (arena_salloc(ptr, false));
 }
 
+volatile uint64_t nevents;
+
 void
 tcache_event_hard(tsd_t *tsd, tcache_t *tcache)
 {
-	szind_t binind = tcache->next_gc_bin;
-	tcache_bin_t *tbin = &tcache->tbins[binind];
-	tcache_bin_info_t *tbin_info = &tcache_bin_info[binind];
+	szind_t binind;
+    ccache_bin_t *cbin;
+	tcache_bin_t *tbin;
+	tcache_bin_info_t *tbin_info;
+    uint32_t low_water, ncached, tid;
+    uint64_t val;
 
-	if (tbin->low_water > 0) {
+    ccache_t *ccache = tsd_ccache_get(tsd);
+
+    /* TODO: fix this ugly hack. */
+    binind = ccache->next_gc_bin;
+    if (binind >= nhbins) {
+        ccache->next_gc_bin = 0;
+        return;
+    }
+
+    cbin = &(tsd_ccache_get(tsd)->cbins[binind]);
+	tbin = &tcache->tbins[binind];
+	tbin_info = &tcache_bin_info[binind];
+
+    ccache_bin_lock(tsd, cbin);
+
+    val = ACCESS_ONCE(cbin->data);
+    cache_bin_get_info(val, &ncached, &low_water, &tid);
+
+    /* if (binind == 30) { */
+    /*     __sync_fetch_and_add(&nevents, 1); */
+    /*     printf(">>>>>>>>>>> thd %p, now %llu events: low_water %d (refilled %d), ncached %d div %d\n", */
+    /*            tsd, nevents, low_water, cbin->refilled, ncached, cbin->lg_fill_div); */
+    /* } */
+
+	if (low_water > 0) {
 		/*
 		 * Flush (ceiling) 3/4 of the objects below the low water mark.
 		 */
 		if (binind < NBINS) {
-			tcache_bin_flush_small(tsd, tcache, tbin, binind,
-			    tbin->ncached - tbin->low_water + (tbin->low_water
-			    >> 2));
+			val = tcache_bin_flush_small_locked(tsd, tcache, tbin, cbin, binind,
+			    ncached - low_water + (low_water >> 2));
 		} else {
-			tcache_bin_flush_large(tsd, tbin, binind, tbin->ncached
-			    - tbin->low_water + (tbin->low_water >> 2), tcache);
+			val = tcache_bin_flush_large_locked(tsd, tcache, tbin, cbin, binind,
+                ncached - low_water + (low_water >> 2));
 		}
+        /* Get the updated ncached value. */
+        cache_bin_get_info(val, &ncached, &low_water, &tid);
+
 		/*
 		 * Reduce fill count by 2X.  Limit lg_fill_div such that the
 		 * fill count is always at least 1.
 		 */
-		if ((tbin_info->ncached_max >> (tbin->lg_fill_div+1)) >= 1)
-			tbin->lg_fill_div++;
-	} else if (tbin->low_water < 0) {
+		if ((tbin_info->ncached_max >> (cbin->lg_fill_div+1)) >= 1) {
+			cbin->lg_fill_div++;
+//            if (binind == 30) printf("div ++ : %d\n", cbin->lg_fill_div);
+        }
+	} else if (low_water == 0 && cbin->refilled) {
 		/*
 		 * Increase fill count by 2X.  Make sure lg_fill_div stays
 		 * greater than 0.
 		 */
-		if (tbin->lg_fill_div > 1)
-			tbin->lg_fill_div--;
-	}
-	tbin->low_water = tbin->ncached;
+		if (cbin->lg_fill_div > 1) {
+			cbin->lg_fill_div--;
+//            if (binind == 30) printf("div ------- : %d\n", cbin->lg_fill_div);
+        }
+	} else {
+//        if (binind == 30) printf("nothing: div %d, low %d, refilled %d\n", cbin->lg_fill_div, low_water, cbin->refilled);
+    }
 
-	tcache->next_gc_bin++;
-	if (tcache->next_gc_bin == nhbins)
-		tcache->next_gc_bin = 0;
+    cbin->refilled = false;
+    /* Update low_water to ncached. */
+    val = cbin_data_pack(ncached, ncached, tid);
+    assert(!CCACHE_IS_LOCKED(val));
+    ccache_bin_unlock(tsd, cbin, val);
+
+	ccache->next_gc_bin++;
+	if (ccache->next_gc_bin >= nhbins)
+		ccache->next_gc_bin = 0;
+
+    percpu_cache_arena_update(tsd, malloc_getcpu());
 }
 
 void *
 tcache_alloc_small_hard(tsd_t *tsd, arena_t *arena, tcache_t *tcache,
-    tcache_bin_t *tbin, szind_t binind, bool *tcache_success)
+    tcache_bin_t *tbin, ccache_bin_t *cbin, szind_t binind, uint32_t curr_thd,
+    ret_status_t *ret_status)
 {
 	void *ret;
 
-	arena_tcache_fill_small(tsd, arena, tbin, binind, config_prof ?
+	arena_tcache_fill_small(tsd, arena, tbin, cbin, binind, config_prof ?
 	    tcache->prof_accumbytes : 0);
 	if (config_prof)
 		tcache->prof_accumbytes = 0;
-	ret = tcache_alloc_easy(tbin, tcache_success);
+	ret = tcache_alloc_easy(cbin, curr_thd, ret_status);
 
 	return (ret);
 }
 
-void
-tcache_bin_flush_small(tsd_t *tsd, tcache_t *tcache, tcache_bin_t *tbin,
-    szind_t binind, unsigned rem)
+uint64_t
+tcache_bin_flush_small_locked(tsd_t *tsd, tcache_t *tcache, tcache_bin_t *tbin,
+    ccache_bin_t *cbin, szind_t binind, unsigned rem)
 {
 	arena_t *arena;
 	void *ptr;
 	unsigned i, nflush, ndeferred;
 	bool merged_stats = false;
+    uint32_t low_water, ncached, tid;
+    uint64_t val;
 
-	assert(binind < NBINS);
-	assert(rem <= tbin->ncached);
+    val = ACCESS_ONCE(cbin->data);
+    assert(val & CBIN_BITLOCK);
+    cache_bin_get_info(val, &ncached, &low_water, &tid);
+//ifdef percpu
+    if (rem >= ncached) {
+        val &= ~CBIN_BITLOCK;
+        goto label_return;
+    }
+//elseif
+//	assert(rem <= tbin->ncached);
 
 	arena = arena_choose(tsd, NULL);
 	assert(arena != NULL);
-	for (nflush = tbin->ncached - rem; nflush > 0; nflush = ndeferred) {
+	for (nflush = ncached - rem; nflush > 0; nflush = ndeferred) {
 		/* Lock the arena bin associated with the first object. */
 		arena_chunk_t *chunk = (arena_chunk_t *)CHUNK_ADDR2BASE(
-		    *(tbin->avail - 1));
+		    *(cbin->avail - 1));
 		arena_t *bin_arena = extent_node_arena_get(&chunk->node);
 		arena_bin_t *bin = &bin_arena->bins[binind];
 
@@ -121,7 +177,7 @@ tcache_bin_flush_small(tsd_t *tsd, tcache_t *tcache, tcache_bin_t *tbin,
 		}
 		ndeferred = 0;
 		for (i = 0; i < nflush; i++) {
-			ptr = *(tbin->avail - 1 - i);
+			ptr = *(cbin->avail - 1 - i);
 			assert(ptr != NULL);
 			chunk = (arena_chunk_t *)CHUNK_ADDR2BASE(ptr);
 			if (extent_node_arena_get(&chunk->node) == bin_arena) {
@@ -138,7 +194,7 @@ tcache_bin_flush_small(tsd_t *tsd, tcache_t *tcache, tcache_bin_t *tbin,
 				 * locked.  Stash the object, so that it can be
 				 * handled in a future pass.
 				 */
-				*(tbin->avail - 1 - ndeferred) = ptr;
+				*(cbin->avail - 1 - ndeferred) = ptr;
 				ndeferred++;
 			}
 		}
@@ -158,31 +214,56 @@ tcache_bin_flush_small(tsd_t *tsd, tcache_t *tcache, tcache_bin_t *tbin,
 		malloc_mutex_unlock(&bin->lock);
 	}
 
-	memmove(tbin->avail - rem, tbin->avail - tbin->ncached, rem *
+	memmove(cbin->avail - rem, cbin->avail - ncached, rem *
 	    sizeof(void *));
-	tbin->ncached = rem;
-	if ((int)tbin->ncached < tbin->low_water)
-		tbin->low_water = tbin->ncached;
+
+    ncached = rem;
+    if (ncached < low_water)
+		low_water = ncached;
+    val = cbin_data_pack(rem, low_water, tid);
+label_return:
+    return val;
 }
 
 void
-tcache_bin_flush_large(tsd_t *tsd, tcache_bin_t *tbin, szind_t binind,
-    unsigned rem, tcache_t *tcache)
+tcache_bin_flush_small(tsd_t *tsd, tcache_t *tcache, tcache_bin_t *tbin,
+    ccache_bin_t *cbin, szind_t binind, unsigned rem)
+{
+    uint64_t bin_data;
+
+    ccache_bin_lock(tsd, cbin);
+    bin_data = tcache_bin_flush_small_locked(tsd, tcache, tbin, cbin, binind, rem);
+    ccache_bin_unlock(tsd, cbin, bin_data);
+}
+
+uint64_t
+tcache_bin_flush_large_locked(tsd_t *tsd, tcache_t *tcache, tcache_bin_t *tbin,
+    ccache_bin_t *cbin, szind_t binind, unsigned rem)
 {
 	arena_t *arena;
 	void *ptr;
 	unsigned i, nflush, ndeferred;
+    uint32_t low_water, ncached, tid;
+    uint64_t val;
 	bool merged_stats = false;
 
-	assert(binind < nhbins);
-	assert(rem <= tbin->ncached);
+    val = ACCESS_ONCE(cbin->data);
+    cache_bin_get_info(val, &ncached, &low_water, &tid);
+//ifdef percpu
+    if (rem >= ncached) {
+        val &= ~CBIN_BITLOCK;
+        goto label_return;
+    }
+//elseif
+//	assert(rem <= tbin->ncached);
 
+	assert(binind < nhbins);
 	arena = arena_choose(tsd, NULL);
 	assert(arena != NULL);
-	for (nflush = tbin->ncached - rem; nflush > 0; nflush = ndeferred) {
+	for (nflush = ncached - rem; nflush > 0; nflush = ndeferred) {
 		/* Lock the arena associated with the first object. */
 		arena_chunk_t *chunk = (arena_chunk_t *)CHUNK_ADDR2BASE(
-		    *(tbin->avail - 1));
+		    *(cbin->avail - 1));
 		arena_t *locked_arena = extent_node_arena_get(&chunk->node);
 		UNUSED bool idump;
 
@@ -206,7 +287,7 @@ tcache_bin_flush_large(tsd_t *tsd, tcache_bin_t *tbin, szind_t binind,
 		}
 		ndeferred = 0;
 		for (i = 0; i < nflush; i++) {
-			ptr = *(tbin->avail - 1 - i);
+			ptr = *(cbin->avail - 1 - i);
 			assert(ptr != NULL);
 			chunk = (arena_chunk_t *)CHUNK_ADDR2BASE(ptr);
 			if (extent_node_arena_get(&chunk->node) ==
@@ -220,7 +301,7 @@ tcache_bin_flush_large(tsd_t *tsd, tcache_bin_t *tbin, szind_t binind,
 				 * Stash the object, so that it can be handled
 				 * in a future pass.
 				 */
-				*(tbin->avail - 1 - ndeferred) = ptr;
+				*(cbin->avail - 1 - ndeferred) = ptr;
 				ndeferred++;
 			}
 		}
@@ -242,11 +323,26 @@ tcache_bin_flush_large(tsd_t *tsd, tcache_bin_t *tbin, szind_t binind,
 		malloc_mutex_unlock(&arena->lock);
 	}
 
-	memmove(tbin->avail - rem, tbin->avail - tbin->ncached, rem *
+	memmove(cbin->avail - rem, cbin->avail - ncached, rem *
 	    sizeof(void *));
-	tbin->ncached = rem;
-	if ((int)tbin->ncached < tbin->low_water)
-		tbin->low_water = tbin->ncached;
+
+    ncached = rem;
+    if (ncached < low_water)
+		low_water = ncached;
+    val = cbin_data_pack(rem, low_water, tid);
+label_return:
+    return val;
+}
+
+void
+tcache_bin_flush_large(tsd_t *tsd, tcache_t *tcache, tcache_bin_t *tbin,
+    ccache_bin_t *cbin, szind_t binind, unsigned rem)
+{
+    uint64_t bin_data;
+
+    ccache_bin_lock(tsd, cbin);
+    bin_data = tcache_bin_flush_large_locked(tsd, tcache, tbin, cbin, binind, rem);
+    ccache_bin_unlock(tsd, cbin, bin_data);
 }
 
 void
@@ -310,20 +406,23 @@ tcache_get_hard(tsd_t *tsd)
 	return (tcache_create(tsd, arena));
 }
 
+#include <sys/syscall.h>
 tcache_t *
 tcache_create(tsd_t *tsd, arena_t *arena)
 {
 	tcache_t *tcache;
-	size_t size, stack_offset;
-	unsigned i;
+	size_t size/* , stack_offset */;
 
 	size = offsetof(tcache_t, tbins) + (sizeof(tcache_bin_t) * nhbins);
 	/* Naturally align the pointer stacks. */
 	size = PTR_CEILING(size);
-	stack_offset = size;
-	size += stack_nelms * sizeof(void *);
-	/* Avoid false cacheline sharing. */
-	size = sa2u(size, CACHELINE);
+
+    // TODO only for tcache
+	/* stack_offset = size; */
+	/* size += stack_nelms * sizeof(void *); */
+
+	/* Avoid false cacheline sharing (additional cacheline for prefetching). */
+	size = sa2u(size + CACHELINE, CACHELINE);
 
 	tcache = ipallocztm(tsd, size, CACHELINE, true, false, true,
 	    arena_get(0, false));
@@ -335,34 +434,42 @@ tcache_create(tsd_t *tsd, arena_t *arena)
 	ticker_init(&tcache->gc_ticker, TCACHE_GC_INCR);
 
 	assert((TCACHE_NSLOTS_SMALL_MAX & 1U) == 0);
-	for (i = 0; i < nhbins; i++) {
-		tcache->tbins[i].lg_fill_div = 1;
-		stack_offset += tcache_bin_info[i].ncached_max * sizeof(void *);
-		/*
-		 * avail points past the available space.  Allocations will
-		 * access the slots toward higher addresses (for the benefit of
-		 * prefetch).
-		 */
-		tcache->tbins[i].avail = (void **)((uintptr_t)tcache +
-		    (uintptr_t)stack_offset);
-	}
+//#ifndef
+	/* for (i = 0; i < nhbins; i++) { */
+	/* 	stack_offset += tcache_bin_info[i].ncached_max * sizeof(void *); */
+	/* 	/\* */
+	/* 	 * avail points past the available space.  Allocations will */
+	/* 	 * access the slots toward higher addresses (for the benefit of */
+	/* 	 * prefetch). */
+	/* 	 *\/ */
+	/* 	tcache->tbins[i].avail = (void **)((uintptr_t)tcache + */
+	/* 	    (uintptr_t)stack_offset); */
+	/* } */
 
 	return (tcache);
 }
+
+volatile unsigned t_killed = 0;
 
 static void
 tcache_destroy(tsd_t *tsd, tcache_t *tcache)
 {
 	arena_t *arena;
+//    ccache_t *ccache;
 	unsigned i;
 
 	arena = arena_choose(tsd, NULL);
 	tcache_arena_dissociate(tcache, arena);
 
+    __sync_fetch_and_add(&t_killed, 1);
+
+//    ccache = tsd_ccache_get(tsd);
+
 	for (i = 0; i < NBINS; i++) {
 		tcache_bin_t *tbin = &tcache->tbins[i];
-		tcache_bin_flush_small(tsd, tcache, tbin, i, 0);
+//        ccache_bin_t *cbin = &ccache->cbins[i];
 
+//        tcache_bin_flush_small(tsd, tcache, tbin, cbin, i, 0);
 		if (config_stats && tbin->tstats.nrequests != 0) {
 			arena_bin_t *bin = &arena->bins[i];
 			malloc_mutex_lock(&bin->lock);
@@ -373,8 +480,9 @@ tcache_destroy(tsd_t *tsd, tcache_t *tcache)
 
 	for (; i < nhbins; i++) {
 		tcache_bin_t *tbin = &tcache->tbins[i];
-		tcache_bin_flush_large(tsd, tbin, i, 0, tcache);
+//        ccache_bin_t *cbin = &ccache->cbins[i];
 
+//        tcache_bin_flush_large(tsd, tcache, tbin, cbin, i, 0);
 		if (config_stats && tbin->tstats.nrequests != 0) {
 			malloc_mutex_lock(&arena->lock);
 			arena->stats.nrequests_large += tbin->tstats.nrequests;
@@ -469,6 +577,67 @@ tcaches_create(tsd_t *tsd, unsigned *r_ind)
 		*r_ind = tcaches_past;
 		tcaches_past++;
 	}
+
+	return (false);
+}
+
+ccache_t *
+ccache_create(tsd_t *tsd)
+{
+	ccache_t *ccache;
+	size_t size, stack_offset;
+	unsigned i;
+
+	size = offsetof(ccache_t, cbins) + sizeof(ccache_bin_t) * nhbins;
+	/* Naturally align the pointer stacks. */
+	size = PTR_CEILING(size);
+	stack_offset = size;
+	size += stack_nelms * sizeof(void *);
+	/* Avoid false cacheline sharing. 1 extra cacheline for prefeteching. */
+	size = sa2u(size + CACHELINE, CACHELINE);
+
+	ccache = ipallocztm(tsd, size, CACHELINE, true, false, true,
+	    arena_get(0, false));
+	if (ccache == NULL)
+		return (NULL);
+
+    ccache->next_gc_bin = 0;
+	assert((TCACHE_NSLOTS_SMALL_MAX & 1U) == 0);
+	for (i = 0; i < nhbins; i++) {
+		ccache->cbins[i].lg_fill_div = 1;
+		ccache->cbins[i].refilled = false;
+		stack_offset += tcache_bin_info[i].ncached_max * sizeof(void *);
+		/*
+		 * avail points past the available space.  Allocations will
+		 * access the slots toward higher addresses (for the benefit of
+		 * prefetch).
+		 */
+		ccache->cbins[i].avail = (void **)((uintptr_t)ccache +
+		    (uintptr_t)stack_offset);
+	}
+
+	return (ccache);
+}
+
+bool
+ccaches_create(unsigned ncaches)
+{
+	ccache_t *ccache;
+    unsigned i;
+    tsd_t *tsd = tsd_fetch();
+
+    /* ccaches is only accessed when thread migration is detected. */
+    ccaches = base_alloc(sizeof(ccache_t *) * ncaches);
+    if (ccaches == NULL)
+        return (true);
+
+    for (i = 0; i < ncaches; i++) {
+        ccache = ccache_create(tsd);
+        if (ccache == NULL)
+            return (true);
+        ccache->ind = i;
+        ccaches[i] = ccache;
+    }
 
 	return (false);
 }

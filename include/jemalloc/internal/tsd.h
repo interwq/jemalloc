@@ -533,6 +533,8 @@ struct tsd_init_head_s {
 #define	MALLOC_TSD							\
 /*  O(name,			type) */				\
     O(tcache,			tcache_t *)				\
+    O(tid, uint32_t) \
+    O(ccache,			ccache_t *)				\
     O(thread_allocated,		uint64_t)				\
     O(thread_deallocated,	uint64_t)				\
     O(prof_tdata,		prof_tdata_t *)				\
@@ -546,6 +548,8 @@ struct tsd_init_head_s {
 #define	TSD_INITIALIZER {						\
     tsd_state_uninitialized,						\
     NULL,								\
+    -1,                                 \
+    NULL,                               \
     0,									\
     0,									\
     NULL,								\

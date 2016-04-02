@@ -2206,23 +2206,40 @@ arena_bin_malloc_hard(arena_t *arena, arena_bin_t *bin)
 	return (arena_run_reg_alloc(bin->runcur, bin_info));
 }
 
+//TODO: FIXME!!!!
+#define ACCESS_ONCE(x) (*(volatile typeof(x) *)&(x))
+#define CBIN_BITLOCK (1UL << 31)
+
 void
 arena_tcache_fill_small(tsd_t *tsd, arena_t *arena, tcache_bin_t *tbin,
-    szind_t binind, uint64_t prof_accumbytes)
+     ccache_bin_t *cbin, szind_t binind, uint64_t prof_accumbytes)
 {
 	unsigned i, nfill;
 	arena_bin_t *bin;
+    uint32_t low_water, ncached, tid;
+    uint64_t val;
 
-	assert(tbin->ncached == 0);
+//#ifndef // only true w/o percpu caching
+//	assert(tbin->ncached == 0);
+//#elseif
+    ccache_bin_lock(tsd, cbin);
+    val = ACCESS_ONCE(cbin->data);
+    cache_bin_get_info(val, &ncached, &low_water, &tid);
+    if (ncached) {
+        val &= ~CBIN_BITLOCK;
+        /* Other threads refilled before us. */
+        goto label_return;
+    }
 
 	if (config_prof && arena_prof_accum(arena, prof_accumbytes))
 		prof_idump();
 	bin = &arena->bins[binind];
 	malloc_mutex_lock(&bin->lock);
 	for (i = 0, nfill = (tcache_bin_info[binind].ncached_max >>
-	    tbin->lg_fill_div); i < nfill; i++) {
+	    cbin->lg_fill_div); i < nfill; i++) {
 		arena_run_t *run;
 		void *ptr;
+
 		if ((run = bin->runcur) != NULL && run->nfree > 0)
 			ptr = arena_run_reg_alloc(run, &arena_bin_info[binind]);
 		else
@@ -2234,7 +2251,7 @@ arena_tcache_fill_small(tsd_t *tsd, arena_t *arena, tcache_bin_t *tbin,
 			 * be moved just before tbin->avail before bailing out.
 			 */
 			if (i > 0) {
-				memmove(tbin->avail - i, tbin->avail - nfill,
+				memmove(cbin->avail - i, cbin->avail - nfill,
 				    i * sizeof(void *));
 			}
 			break;
@@ -2244,8 +2261,12 @@ arena_tcache_fill_small(tsd_t *tsd, arena_t *arena, tcache_bin_t *tbin,
 			    true);
 		}
 		/* Insert such that low regions get used first. */
-		*(tbin->avail - nfill + i) = ptr;
+		*(cbin->avail - nfill + i) = ptr;
 	}
+    /* if (binind == 30) { */
+    /*     printf("ind 30 filled %d (div %d, refilled %d)\n", nfill, cbin->lg_fill_div, cbin->refilled); */
+    /* } */
+
 	if (config_stats) {
 		bin->stats.nmalloc += i;
 		bin->stats.nrequests += tbin->tstats.nrequests;
@@ -2254,8 +2275,10 @@ arena_tcache_fill_small(tsd_t *tsd, arena_t *arena, tcache_bin_t *tbin,
 		tbin->tstats.nrequests = 0;
 	}
 	malloc_mutex_unlock(&bin->lock);
-	tbin->ncached = i;
 	arena_decay_tick(tsd, arena);
+    val = cbin_data_pack(i, low_water, tid);
+label_return:
+    ccache_bin_unlock(tsd, cbin, val);
 }
 
 void

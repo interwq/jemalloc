@@ -10,6 +10,7 @@ typedef struct malloc_mutex_s malloc_mutex_t;
 #elif (defined(JEMALLOC_MUTEX_INIT_CB))
 #  define MALLOC_MUTEX_INITIALIZER {PTHREAD_MUTEX_INITIALIZER, NULL}
 #else
+/* Adaptive mutex unlikely useful w/ percpu arena? */
 #  if (defined(JEMALLOC_HAVE_PTHREAD_MUTEX_ADAPTIVE_NP) &&		\
        defined(PTHREAD_ADAPTIVE_MUTEX_INITIALIZER_NP))
 #    define MALLOC_MUTEX_TYPE PTHREAD_MUTEX_ADAPTIVE_NP

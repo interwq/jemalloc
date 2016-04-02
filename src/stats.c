@@ -365,6 +365,8 @@ stats_arena_print(void (*write_cb)(void *, const char *), void *cbopaque,
 		stats_arena_hchunks_print(write_cb, cbopaque, i);
 }
 
+extern unsigned t_killed;
+
 void
 stats_print(void (*write_cb)(void *, const char *), void *cbopaque,
     const char *opts)
@@ -428,6 +430,30 @@ stats_print(void (*write_cb)(void *, const char *), void *cbopaque,
 		}
 	}
 
+    {
+#include <sys/resource.h>
+
+#define ACCESS_ONCE(x) (*(volatile typeof(x) *)&(x))
+
+        int i,j;
+        ccache_t *c;
+        struct rusage r_usage;
+        uint64_t tot = 0, val, n;
+        for (i = 0; i < ncpus; i++) {
+            c = ccaches[i];
+            for (j = 0; j < nhbins; j++) {
+                val = ACCESS_ONCE(c->cbins[j].data);
+                n = val & ((1<<10) - 1);
+                /* if (n) */
+                /*     printf("cpu %d, bin %d, ncached %llu (max %u), size %u\n", i, j, n,  tcache_bin_info[j].ncached_max,index2size(j)); */
+                tot += n*index2size(j);
+            }
+        }
+
+        getrusage(RUSAGE_SELF,&r_usage);
+        malloc_cprintf(write_cb, cbopaque,">>> Total cached bytes %lu (%lu MBs) on %d cores.  RSS %lu MB, csw %ld, %ld. tkilled %d\n",
+                       tot, tot >> 20, ncpus, r_usage.ru_maxrss >> 10, r_usage.ru_nvcsw, r_usage.ru_nivcsw, t_killed);
+    }
 	malloc_cprintf(write_cb, cbopaque,
 	    "___ Begin jemalloc statistics ___\n");
 	if (general) {
@@ -635,7 +661,7 @@ stats_print(void (*write_cb)(void *, const char *), void *cbopaque,
 					malloc_cprintf(write_cb, cbopaque,
 					    "\nMerged arenas stats:\n");
 					stats_arena_print(write_cb, cbopaque,
-					    narenas, bins, large, huge);
+                        narenas, bins, large, huge);
 				}
 			}
 		}

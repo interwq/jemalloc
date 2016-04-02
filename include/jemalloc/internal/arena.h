@@ -29,7 +29,7 @@ typedef enum {
 
 	purge_mode_limit = 2
 } purge_mode_t;
-#define	PURGE_DEFAULT		purge_mode_ratio
+#define	PURGE_DEFAULT		purge_mode_decay /*purge_mode_ratio*/
 /* Default decay time in seconds. */
 #define	DECAY_TIME_DEFAULT	10
 /* Number of event ticks between time checks. */
@@ -523,7 +523,7 @@ bool	arena_decay_time_set(arena_t *arena, ssize_t decay_time);
 void	arena_maybe_purge(arena_t *arena);
 void	arena_purge(arena_t *arena, bool all);
 void	arena_tcache_fill_small(tsd_t *tsd, arena_t *arena, tcache_bin_t *tbin,
-    szind_t binind, uint64_t prof_accumbytes);
+    ccache_bin_t *cbin, szind_t binind, uint64_t prof_accumbytes);
 void	arena_alloc_junk_small(void *ptr, arena_bin_info_t *bin_info,
     bool zero);
 #ifdef JEMALLOC_JET

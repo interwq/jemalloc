@@ -57,7 +57,11 @@ static malloc_mutex_t	arenas_lock;
  * arenas.  arenas[narenas_auto..narenas_total) are only used if the application
  * takes some action to create them and allocate from them.
  */
-arena_t			**arenas;
+
+//arena_t			**arenas;
+JEMALLOC_ALIGNED(CACHELINE)
+arena_t         *arenas[MALLOCX_ARENA_MAX];
+
 static unsigned		narenas_total; /* Use narenas_total_*(). */
 static arena_t		*a0; /* arenas[0]; read-only after initialization. */
 static unsigned		narenas_auto; /* Read-only after initialization. */
@@ -417,12 +421,14 @@ arena_init_locked(unsigned ind)
 {
 	arena_t *arena;
 
-	assert(ind <= narenas_total_get());
+//	assert(ind <= narenas_total_get());
+//    assert(ind <= ncpus);
 	if (ind > MALLOCX_ARENA_MAX)
 		return (NULL);
-	if (ind == narenas_total_get())
-		narenas_total_inc();
-
+#ifndef PERCPU_ARENA
+    if (ind == narenas_total_get())
+        narenas_total_inc();
+#endif
 	/*
 	 * Another thread may have already initialized arenas[ind] if it's an
 	 * auto arena.
@@ -433,6 +439,13 @@ arena_init_locked(unsigned ind)
 		return (arena);
 	}
 
+#ifdef PERCPU_ARENA
+    narenas_total_inc();
+#endif
+    /* ncpus may be 0 during initialization. */
+    /* assert((narenas_total_get() <= ncpus) || !ncpus); */
+
+    // TODO: fix race
 	/* Actually initialize the arena. */
 	arena = arena_new(ind);
 	arena_set(ind, arena);
@@ -458,8 +471,10 @@ arena_bind(tsd_t *tsd, unsigned ind)
 	arena = arena_get(ind, false);
 	arena_nthreads_inc(arena);
 
-	if (tsd_nominal(tsd))
+	if (tsd_nominal(tsd)) {
 		tsd_arena_set(tsd, arena);
+        assert(arena == arenas[ind]);
+    }
 }
 
 void
@@ -472,6 +487,8 @@ arena_migrate(tsd_t *tsd, unsigned oldind, unsigned newind)
 	arena_nthreads_dec(oldarena);
 	arena_nthreads_inc(newarena);
 	tsd_arena_set(tsd, newarena);
+
+    assert(newarena == arenas[newind]);
 }
 
 static void
@@ -566,6 +583,17 @@ arena_choose_hard(tsd_t *tsd)
 {
 	arena_t *ret;
 
+#ifdef PERCPU_ARENA  // TODO ifdef
+    unsigned choose = malloc_getcpu();
+
+    ret = arena_get(choose, true);
+    assert(ret);
+    arena_bind(tsd, choose);
+    assert(ret == arenas[choose]);
+
+    return ret;
+#endif
+
 	if (narenas_auto > 1) {
 		unsigned i, choose, first_null;
 
@@ -621,6 +649,20 @@ arena_choose_hard(tsd_t *tsd)
 	}
 
 	return (ret);
+}
+
+void
+tid_cleanup(tsd_t *tsd)
+{
+
+	/* Do nothing. */
+}
+
+void
+ccache_cleanup(tsd_t *tsd)
+{
+
+	/* Do nothing. */
 }
 
 void
@@ -1218,7 +1260,6 @@ malloc_init_hard_needed(void)
 static bool
 malloc_init_hard_a0_locked(void)
 {
-
 	malloc_initializer = INITIALIZER;
 
 	if (config_prof)
@@ -1251,15 +1292,23 @@ malloc_init_hard_a0_locked(void)
 	 * malloc_ncpus().
 	 */
 	narenas_auto = 1;
-	narenas_total_set(narenas_auto);
-	arenas = &a0;
+//	narenas_total_set(narenas_auto);
+//	arenas = &a0;
+
 	memset(arenas, 0, sizeof(arena_t *) * narenas_auto);
 	/*
 	 * Initialize one arena here.  The rest are lazily created in
 	 * arena_choose_hard().
 	 */
-	if (arena_init(0) == NULL)
-		return (true);
+    if (arena_init(0) == NULL)
+        return (true);
+    a0 = arena_get(0, false);
+    assert(a0);
+
+    /* for (int i = 0; i < 32; i++) { */
+    /*     if (arena_init(i) == NULL) */
+    /*         return (true); */
+    /* } */
 	malloc_init_state = malloc_init_a0_initialized;
 	return (false);
 }
@@ -1284,7 +1333,6 @@ static bool
 malloc_init_hard_recursible(void)
 {
 	bool ret = false;
-
 	malloc_init_state = malloc_init_recursible;
 	malloc_mutex_unlock(&init_lock);
 
@@ -1295,6 +1343,18 @@ malloc_init_hard_recursible(void)
 	}
 
 	ncpus = malloc_ncpus();
+
+    //TODO: after fixing the ctl calls with percpu arenas, get rid of this
+    //(restore to on demand arena creation.)
+#ifdef PERCPU_ARENA
+    for (int i = 1; i < ncpus; i++) {
+        if (arena_init(i) == NULL) {
+            ret = true;
+            goto label_return;
+        }
+    }
+#endif
+
 
 #if (!defined(JEMALLOC_MUTEX_INIT_CB) && !defined(JEMALLOC_ZONE) \
     && !defined(_WIN32) && !defined(__native_client__))
@@ -1317,7 +1377,6 @@ label_return:
 static bool
 malloc_init_hard_finish(void)
 {
-
 	if (mutex_boot())
 		return (true);
 
@@ -1331,6 +1390,11 @@ malloc_init_hard_finish(void)
 		else
 			opt_narenas = 1;
 	}
+    //TODO: ifdef
+#ifdef PERCPU_ARENA
+    opt_narenas = ncpus;
+#endif
+
 	narenas_auto = opt_narenas;
 	/*
 	 * Limit the number of arenas to the indexing range of MALLOCX_ARENA().
@@ -1343,12 +1407,16 @@ malloc_init_hard_finish(void)
 	narenas_total_set(narenas_auto);
 
 	/* Allocate and initialize arenas. */
-	arenas = (arena_t **)base_alloc(sizeof(arena_t *) *
-	    (MALLOCX_ARENA_MAX+1));
-	if (arenas == NULL)
-		return (true);
-	/* Copy the pointer to the one arena that was already initialized. */
-	arena_set(0, a0);
+	/* arenas = (arena_t **)base_alloc(sizeof(arena_t *) * */
+	/*     (MALLOCX_ARENA_MAX+1)); */
+	/* if (arenas == NULL) */
+	/* 	return (true); */
+	/* /\* Copy the pointer to the one arena that was already initialized. *\/ */
+	/* arena_set(0, a0); */
+    assert(a0 == arenas[0]);
+
+    //ifdef percpu
+    ccaches_create(ncpus);
 
 	malloc_init_state = malloc_init_initialized;
 	malloc_slow_flag_init();
@@ -1359,7 +1427,6 @@ malloc_init_hard_finish(void)
 static bool
 malloc_init_hard(void)
 {
-
 #if defined(_WIN32) && _WIN32_WINNT < 0x0600
 	_init_init_lock();
 #endif
@@ -2587,6 +2654,14 @@ je_malloc_stats_print(void (*write_cb)(void *, const char *), void *cbopaque,
     const char *opts)
 {
 
+/*     int i; */
+/*     uint64_t v; */
+/*     ccache_t *c = &ccaches[0]; */
+/*     for (i=0; i < nhbins; i++) { */
+/*         v = c->cbins[i].data; */
+/* //        v &= ((1<<10)-1); */
+/*         printf("cpu 0 bin %d: %llx cached\n",i, v); */
+/*     } */
 	stats_print(write_cb, cbopaque, opts);
 }
 

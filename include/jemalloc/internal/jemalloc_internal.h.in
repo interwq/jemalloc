@@ -4,6 +4,9 @@
 #include "jemalloc_internal_defs.h"
 #include "jemalloc/internal/jemalloc_internal_decls.h"
 
+// Disable this for now.
+//#define PERCPU_ARENA
+
 #ifdef JEMALLOC_UTRACE
 #include <sys/ktrace.h>
 #endif
@@ -444,7 +447,7 @@ extern unsigned	ncpus;
  * Arenas that are used to service external requests.  Not all elements of the
  * arenas array are necessarily used; arenas are created lazily as needed.
  */
-extern arena_t	**arenas;
+extern arena_t	*arenas[];
 
 /*
  * index2size_tab encodes the same information as could be computed (at
@@ -469,6 +472,8 @@ arena_t	*arena_init(unsigned ind);
 arena_tdata_t	*arena_tdata_get_hard(tsd_t *tsd, unsigned ind);
 arena_t	*arena_choose_hard(tsd_t *tsd);
 void	arena_migrate(tsd_t *tsd, unsigned oldind, unsigned newind);
+void	ccache_cleanup(tsd_t *tsd);
+void	tid_cleanup(tsd_t *tsd);
 void	thread_allocated_cleanup(tsd_t *tsd);
 void	thread_deallocated_cleanup(tsd_t *tsd);
 void	arena_cleanup(tsd_t *tsd);
@@ -784,8 +789,10 @@ arena_choose(tsd_t *tsd, arena_t *arena)
 {
 	arena_t *ret;
 
-	if (arena != NULL)
+	if (arena != NULL) {
+        assert(arena == arenas[arena->ind]);
 		return (arena);
+    }
 
 	if (unlikely((ret = tsd_arena_get(tsd)) == NULL))
 		ret = arena_choose_hard(tsd);

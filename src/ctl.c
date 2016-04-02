@@ -508,6 +508,12 @@ static const ctl_named_node_t super_root_node[] = {
 
 /******************************************************************************/
 
+
+////////////////////
+// TODO: with per-cpu arenas, narenas doesn't mean arenas[0...n-1] in use
+// anymore. Fix this with the ctl calls.
+////////////////////
+
 static bool
 ctl_arena_init(ctl_arena_stats_t *astats)
 {
