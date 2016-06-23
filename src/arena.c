@@ -31,6 +31,11 @@ unsigned	nhclasses; /* Number of huge size classes. */
 static szind_t	runs_avail_bias; /* Size index for first runs_avail tree. */
 static szind_t	runs_avail_nclasses; /* Number of runs_avail trees. */
 
+
+arena_cache_bin_info_t	*arena_cache_bin_info;
+/* Total stack elms per tcache. */
+extern unsigned		tcache_stack_nelms;
+
 /******************************************************************************/
 /*
  * Function prototypes for static functions that are referenced prior to
@@ -2371,6 +2376,9 @@ arena_bin_malloc_hard(tsdn_t *tsdn, arena_t *arena, arena_bin_t *bin)
 	return (arena_run_reg_alloc(bin->runcur, bin_info));
 }
 
+// Disable as this doesn't seem to help. At least with the current refill policy.
+//#define ACACHE_FILL
+
 void
 arena_tcache_fill_small(tsdn_t *tsdn, arena_t *arena, tcache_bin_t *tbin,
     szind_t binind, uint64_t prof_accumbytes)
@@ -2418,6 +2426,46 @@ arena_tcache_fill_small(tsdn_t *tsdn, arena_t *arena, tcache_bin_t *tbin,
 		bin->stats.nfills++;
 		tbin->tstats.nrequests = 0;
 	}
+#ifdef ACACHE_FILL
+	{
+		uint64_t val, new_val;
+		arena_cache_bin_t *cbin = &arena->acache->cbins[binind];
+		size_t ncached;
+
+		val = ACCESS_ONCE(cbin->data);
+		ncached = val & ACACHE_NCACHE_MASK;
+		if (!(val & ACACHE_LOCKBIT) && !ncached) {
+			new_val = (val + ACACHE_EPOCH_INC) | ACACHE_LOCKBIT;
+			if (likely(!atomic_cas_uint64(&cbin->data, val, new_val))) {
+				unsigned j;
+				for (j = 0, nfill = (arena_cache_bin_info[binind].ncached_max >> 4);
+						 j < nfill; j++) {
+					arena_run_t *run;
+					void *ptr;
+					if ((run = bin->runcur) != NULL && run->nfree > 0)
+						ptr = arena_run_reg_alloc(run, &arena_bin_info[binind]);
+					else
+						ptr = arena_bin_malloc_hard(tsdn, arena, bin);
+					if (ptr == NULL) {
+						break;
+					}
+					if (config_fill && unlikely(opt_junk_alloc)) {
+						arena_alloc_junk_small(ptr, &arena_bin_info[binind],
+						    true);
+					}
+					/* Insert such that low regions get used first. */
+					cbin->avail[j] = ptr;
+				}
+				if (config_stats) {
+					bin->stats.nmalloc += j;
+					bin->stats.curregs += j;
+				}
+				/* Unlock the bin and update ncached. */
+				cbin->data = val + ACACHE_EPOCH_INC + j;
+			}
+		}
+	}
+#endif
 	malloc_mutex_unlock(tsdn, &bin->lock);
 	tbin->ncached = i;
 	arena_decay_tick(tsdn, arena);
@@ -3495,10 +3543,12 @@ arena_nthreads_dec(arena_t *arena, bool internal)
 arena_t *
 arena_new(tsdn_t *tsdn, unsigned ind)
 {
+	arena_cache_t *acache;
 	arena_t *arena;
-	size_t arena_size;
-	unsigned i;
+	size_t arena_size, arena_stats_size, all_size;
+	unsigned i, stack_offset;
 
+	unsigned sum = 0;
 	/* Compute arena size to incorporate sufficient runs_avail elements. */
 	arena_size = offsetof(arena_t, runs_avail) + (sizeof(arena_run_heap_t) *
 	    runs_avail_nclasses);
@@ -3507,14 +3557,44 @@ arena_new(tsdn_t *tsdn, unsigned ind)
 	 * because there is no way to clean up if base_alloc() OOMs.
 	 */
 	if (config_stats) {
-		arena = (arena_t *)base_alloc(tsdn,
-		    CACHELINE_CEILING(arena_size) + QUANTUM_CEILING(nlclasses *
-		    sizeof(malloc_large_stats_t) + nhclasses) *
-		    sizeof(malloc_huge_stats_t));
+		arena_stats_size = CACHELINE_CEILING(arena_size) +
+		    QUANTUM_CEILING(nlclasses * sizeof(malloc_large_stats_t) + nhclasses)
+		    * sizeof(malloc_huge_stats_t);
 	} else
-		arena = (arena_t *)base_alloc(tsdn, arena_size);
+		arena_stats_size = arena_size;
+
+	if (config_acache) {
+		all_size = arena_stats_size + offsetof(arena_cache_t, cbins) +
+			sizeof(arena_cache_bin_t) * nhbins;
+		/* Naturally align the pointer stacks. */
+		all_size = PTR_CEILING(all_size);
+		stack_offset = all_size;
+		all_size += ACACHE_TCACHE_RATIO * tcache_stack_nelms * sizeof(void *);
+	} else
+		all_size = arena_stats_size;
+
+	/*
+	 * Avoid false cacheline sharing. A padded cacheline to avoid interference
+	 * caused by prefetching.
+	 */
+	all_size = CACHELINE_CEILING(all_size) + CACHELINE;
+	arena = (arena_t *)base_alloc(tsdn, all_size);
+
 	if (arena == NULL)
 		return (NULL);
+
+	if (config_acache) {
+		acache = arena->acache = (arena_cache_t *)((uintptr_t)arena +
+		    arena_stats_size);
+		for (i = 0; i < nhbins; i++) {
+			acache->cbins[i].avail = (void **)((uintptr_t)arena +
+			    (uintptr_t)stack_offset);
+			stack_offset += arena_cache_bin_info[i].ncached_max * sizeof(void *);
+			sum += arena_cache_bin_info[i].ncached_max;
+			assert((uintptr_t)(acache->cbins[i].avail) <=
+			    ((uintptr_t)arena + all_size));
+		}
+	}
 
 	arena->ind = ind;
 	arena->nthreads[0] = arena->nthreads[1] = 0;

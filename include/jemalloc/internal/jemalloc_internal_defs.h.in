@@ -137,6 +137,13 @@
 #undef JEMALLOC_TCACHE
 
 /*
+ * JEMALLOC_ACACHE enables per arena caching. This can only be enabled with
+ * tcache on x64 platform currently. Allocation from acache is lock-free and
+ * free to acache only relies on a single bit lock.
+ */
+#undef JEMALLOC_ACACHE
+
+/*
  * JEMALLOC_DSS enables use of sbrk(2) to allocate chunks from the data storage
  * segment (DSS).
  */

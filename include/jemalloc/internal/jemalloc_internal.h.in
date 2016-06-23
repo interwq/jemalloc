@@ -99,6 +99,13 @@ static const bool config_tcache =
     false
 #endif
     ;
+static const bool config_acache =
+#ifdef JEMALLOC_ACACHE
+    true
+#else
+    false
+#endif
+    ;
 static const bool config_tls =
 #ifdef JEMALLOC_TLS
     true
@@ -487,6 +494,9 @@ void	arenas_tdata_bypass_cleanup(tsd_t *tsd);
 void	jemalloc_prefork(void);
 void	jemalloc_postfork_parent(void);
 void	jemalloc_postfork_child(void);
+JEMALLOC_ALWAYS_INLINE void *
+arena_cache_alloc_large(tsdn_t *tsdn, arena_t *arena, szind_t binind,
+    size_t usize, bool zero);
 
 #include "jemalloc/internal/nstime.h"
 #include "jemalloc/internal/valgrind.h"

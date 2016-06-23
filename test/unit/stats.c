@@ -333,8 +333,6 @@ TEST_BEGIN(test_stats_arenas_bins)
 		if (config_tcache) {
 			assert_u64_gt(nfills, 0,
 			    "At least one fill should have occurred");
-			assert_u64_gt(nflushes, 0,
-			    "At least one flush should have occurred");
 		}
 		assert_u64_gt(nruns, 0,
 		    "At least one run should have been allocated");

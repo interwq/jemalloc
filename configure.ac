@@ -30,7 +30,7 @@ AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
 ])
 
 dnl JE_COMPILABLE(label, hcode, mcode, rvar)
-dnl 
+dnl
 dnl Use AC_LINK_IFELSE() rather than AC_COMPILE_IFELSE() so that linker errors
 dnl cause failure.
 AC_DEFUN([JE_COMPILABLE],
@@ -282,7 +282,7 @@ AC_PROG_AR
 dnl Platform-specific settings.  abi and RPATH can probably be determined
 dnl programmatically, but doing so is error-prone, which makes it generally
 dnl not worth the trouble.
-dnl 
+dnl
 dnl Define cpp macros in CPPFLAGS, rather than doing AC_DEFINE(macro), since the
 dnl definitions need to be seen before any headers are included, which is a pain
 dnl to make happen otherwise.
@@ -904,6 +904,32 @@ if test "x$enable_tcache" = "x1" ; then
 fi
 AC_SUBST([enable_tcache])
 
+dnl Arena caching is enabled on x64 platform when tcache is enabled
+AC_ARG_ENABLE([acache],
+  [AS_HELP_STRING([--disable-acache],
+  [Disable per arena caches. Currently can only enable with tcache on x64 platform])],
+[if test "x$enable_acache" = "xno" ; then
+  enable_acache="0"
+else
+  enable_acache="1"
+fi
+],
+[enable_acache="1"]
+)
+if test "x${enable_tcache}" = "x1" && test "x$enable_acache" = "x1" ; then
+  case "${host_cpu}" in
+    x86_64)
+      AC_DEFINE([JEMALLOC_ACACHE], [ ])
+      ;;
+    *)
+      enable_acache="0"
+      ;;
+  esac
+else
+  enable_acache="0"
+fi
+AC_SUBST([enable_acache])
+
 dnl Indicate whether adjacent virtual memory mappings automatically coalesce
 dnl (and fragment on demand).
 if test "x${maps_coalesce}" = "x1" ; then
@@ -1173,7 +1199,7 @@ AC_ARG_WITH([lg_size_class_group],
 
 dnl ============================================================================
 dnl jemalloc configuration.
-dnl 
+dnl
 
 AC_ARG_WITH([version],
   [AS_HELP_STRING([--with-version=<major>.<minor>.<bugfix>-<nrev>-g<gid>],
@@ -1780,6 +1806,7 @@ AC_MSG_RESULT([prof-libunwind     : ${enable_prof_libunwind}])
 AC_MSG_RESULT([prof-libgcc        : ${enable_prof_libgcc}])
 AC_MSG_RESULT([prof-gcc           : ${enable_prof_gcc}])
 AC_MSG_RESULT([tcache             : ${enable_tcache}])
+AC_MSG_RESULT([acache             : ${enable_acache}])
 AC_MSG_RESULT([fill               : ${enable_fill}])
 AC_MSG_RESULT([utrace             : ${enable_utrace}])
 AC_MSG_RESULT([valgrind           : ${enable_valgrind}])
