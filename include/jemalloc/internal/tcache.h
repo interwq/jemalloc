@@ -355,7 +355,12 @@ tcache_alloc_large(tsd_t *tsd, arena_t *arena, tcache_t *tcache, size_t size,
 		if (unlikely(arena == NULL))
 			return (NULL);
 
-		ret = large_malloc(tsd_tsdn(tsd), arena, s2u(size), zero);
+		if (config_acache)
+			ret = arena_cache_alloc_large(tsd_tsdn(tsd), arena, binind,
+			    s2u(size), zero);
+		else
+			ret = large_malloc(tsd_tsdn(tsd), arena, s2u(size), zero);
+
 		if (ret == NULL)
 			return (NULL);
 	} else {

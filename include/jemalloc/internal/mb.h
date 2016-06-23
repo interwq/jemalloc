@@ -13,11 +13,22 @@
 /******************************************************************************/
 #ifdef JEMALLOC_H_INLINES
 
+#define ACCESS_ONCE(x) (*(volatile typeof(x) *)&(x))
+
 #ifndef JEMALLOC_ENABLE_INLINE
 void	mb_write(void);
+void	cc_barrier(void);
 #endif
 
 #if (defined(JEMALLOC_ENABLE_INLINE) || defined(JEMALLOC_MB_C_))
+
+/* Compiler barrier. */
+JEMALLOC_INLINE void
+cc_barrier(void)
+{
+	asm volatile ("" ::: "memory");
+}
+
 #ifdef __i386__
 /*
  * According to the Intel Architecture Software Developer's Manual, current
