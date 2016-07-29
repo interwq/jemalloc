@@ -1500,13 +1500,54 @@ arena_maybe_purge_decay(tsdn_t *tsdn, arena_t *arena)
 	arena_purge_to_limit(tsdn, arena, ndirty_limit);
 }
 
+void arena_cache_gc(tsdn_t *tsdn, arena_t *arena)
+{
+	arena_cache_bin_t *cbin;
+	uint64_t val, new_val;
+	size_t low_water, ncached;
+	unsigned gc_bin;
+	bool locked;
+
+	gc_bin = atomic_add_u(&(arena->acache->next_gc_bin), 1) % nhbins;
+	cbin = &arena->acache->cbins[gc_bin];
+
+	val = cbin_info_get(cbin, &ncached, &low_water, &locked);
+	if (locked) {
+		return;
+	}
+	if (low_water > 0) {
+		bool cas_fail;
+
+		new_val = cbin_info_lock_val(val);
+		/* Lock the bin before flushing. */
+		cas_fail = cbin_info_update(cbin, val, new_val);
+		if (unlikely(cas_fail)) {
+			return;
+		}
+
+		assert(low_water <= ncached);
+		arena_cache_flush(tsdn, arena, &arena->bins[gc_bin], cbin,
+		    &cbin->avail[ncached - low_water], low_water, gc_bin, 0,
+		    gc_bin >= NBINS ? true : false);
+		val = new_val;
+		/* Fall through to update low_water and unlock. */
+	}
+
+	low_water = ncached;
+	new_val = cbin_info_pack(val, ncached, low_water, false);
+	cbin_info_update(cbin, val, new_val);
+}
+
 void
 arena_maybe_purge(tsdn_t *tsdn, arena_t *arena)
 {
-
 	/* Don't recursively purge. */
 	if (arena->purging)
 		return;
+
+	if (config_acache) {
+		arena_cache_gc(tsdn, arena);
+	}
 
 	if (opt_purge == purge_mode_ratio)
 		arena_maybe_purge_ratio(tsdn, arena);
@@ -2435,7 +2476,7 @@ arena_tcache_fill_small(tsdn_t *tsdn, arena_t *arena, tcache_bin_t *tbin,
 		val = ACCESS_ONCE(cbin->data);
 		ncached = val & ACACHE_NCACHE_MASK;
 		if (!(val & ACACHE_LOCKBIT) && !ncached) {
-			new_val = (val + ACACHE_EPOCH_INC) | ACACHE_LOCKBIT;
+			new_val = cbin_info_lock_val(val);
 			if (likely(!atomic_cas_uint64(&cbin->data, val, new_val))) {
 				unsigned j;
 				for (j = 0, nfill = (arena_cache_bin_info[binind].ncached_max >> 4);
@@ -2849,7 +2890,7 @@ arena_prof_promoted(tsdn_t *tsdn, const void *ptr, size_t size)
 	assert(ptr != NULL);
 	assert(CHUNK_ADDR2BASE(ptr) != ptr);
 	assert(isalloc(tsdn, ptr, false) == LARGE_MINCLASS);
-	assert(isalloc(tsdn, ptr, true) == LARGE_MINCLASS);
+//	assert(isalloc(tsdn, ptr, true) == LARGE_MINCLASS);
 	assert(size <= SMALL_MAXCLASS);
 
 	chunk = (arena_chunk_t *)CHUNK_ADDR2BASE(ptr);

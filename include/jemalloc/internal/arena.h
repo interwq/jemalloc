@@ -23,13 +23,6 @@
  */
 #define	LG_DIRTY_MULT_DEFAULT	3
 
-#define ACACHE_EPOCH_OFF 32
-#define ACACHE_EPOCH_INC ((uint64_t)1 << ACACHE_EPOCH_OFF)
-#define ACACHE_LOCKBIT   ((uint64_t)1 << 31)
-#define ACACHE_NCACHE_MASK (((uint64_t)1 << 31) - 1)
-/* Currently fixed size. */
-#define ACACHE_TCACHE_RATIO 8
-
 typedef enum {
 	purge_mode_ratio = 0,
 	purge_mode_decay = 1,
@@ -296,16 +289,26 @@ struct arena_bin_s {
 	malloc_bin_stats_t	stats;
 };
 
+#define ACACHE_EPOCH_OFF 32
+#define ACACHE_EPOCH_INC ((uint64_t)1 << ACACHE_EPOCH_OFF)
+#define ACACHE_LOCKBIT   ((uint64_t)1 << 31)
+#define ACACHE_NCACHED_BITS 15
+#define ACACHE_NCACHE_MASK (((uint64_t)1 << ACACHE_NCACHED_BITS) - 1)
+/* Currently fixed size. */
+#define ACACHE_TCACHE_RATIO 8
+
 struct arena_cache_bin_info_s {
 	unsigned	ncached_max;	/* Upper limit on ncached. */
 	unsigned	flush_remain;
 };
 
 struct arena_cache_bin_s {
-	//FIXME: deal with 32bit cpus? need this in a single word.
 	/*
-	 * layout for data: epoch (32bits) + lock (1bit) + ncached lowest 31bits. The
-	 * single bit lock is used for cache_free.
+	 * +--------     Layout for data (64 bits)     --------+
+	 * | 63...32 |  31  |   30   |  29......15 |  14.....0 |
+	 * | [epoch] | lock | unused | [low_water] | [ncached] |
+	 * +---------------------------------------------------+
+	 * The single bit lock is used for cache_free.
 	 */
 	uint64_t    data;
 
@@ -317,6 +320,7 @@ struct arena_cache_bin_s {
 };
 
 struct arena_cache_s {
+	unsigned next_gc_bin;
 	/*
 	 * cbins is dynamically sized (needs to be last member in this struct) and
 	 * allocated contiguously off the end of arena_s.
@@ -1567,28 +1571,63 @@ arena_sdalloc(tsdn_t *tsdn, void *ptr, size_t size, tcache_t *tcache,
 }
 
 JEMALLOC_ALWAYS_INLINE uint64_t
-cbin_info_get(arena_cache_bin_t *cbin, size_t *ncached, bool *locked)
+cbin_info_get(arena_cache_bin_t *cbin, size_t *ncached, size_t *low_water,
+    bool *locked)
 {
 	uint64_t val = ACCESS_ONCE(cbin->data);
 
-	*ncached = val & ACACHE_NCACHE_MASK;
 	if (val & ACACHE_LOCKBIT)
 		*locked = true;
 	else
 		*locked = false;
 
+	*ncached = val & ACACHE_NCACHE_MASK;
+	*low_water = (val >> ACACHE_NCACHED_BITS) & ACACHE_NCACHE_MASK;
+
 	return val;
+}
+
+JEMALLOC_ALWAYS_INLINE uint64_t
+cbin_info_lock_val(const uint64_t val)
+{
+ return (val + ACACHE_EPOCH_INC) | ACACHE_LOCKBIT;
+}
+
+JEMALLOC_ALWAYS_INLINE bool
+cbin_info_update(arena_cache_bin_t *cbin, const uint64_t old_val,
+    const uint64_t new_val)
+{
+	return atomic_cas_uint64(&cbin->data, old_val, new_val);
+}
+
+JEMALLOC_ALWAYS_INLINE uint64_t
+cbin_info_pack(const uint64_t val, const size_t ncached,
+    const size_t low_water, const bool locked)
+{
+	uint64_t new_val, epoch;
+
+	/* Update epoch when getting the new value. */
+	epoch = (val >> ACACHE_EPOCH_OFF) + 1;
+	new_val = (epoch << ACACHE_EPOCH_OFF) | ncached |
+		(low_water << ACACHE_NCACHED_BITS);
+
+	if (locked) {
+		new_val |= ACACHE_LOCKBIT;
+	}
+
+	return new_val;
 }
 
 /* Return number of items allocated */
 JEMALLOC_ALWAYS_INLINE size_t
-cbin_alloc_to_tbin(arena_cache_bin_t *cbin, tcache_bin_t *tbin, unsigned n_alloc)
+cbin_alloc_to_tbin(arena_cache_bin_t *cbin, tcache_bin_t *tbin,
+    unsigned n_alloc)
 {
 	uint64_t val, new_val;
-	size_t ncached;
+	size_t ncached, low_water;
 	bool cas_fail, locked;
 retry:
-	val = cbin_info_get(cbin, &ncached, &locked);
+	val = cbin_info_get(cbin, &ncached, &low_water, &locked);
 	if (locked || (ncached == 0))
 		return 0;
 
@@ -1599,8 +1638,14 @@ retry:
 	    sizeof(void *) * n_alloc);
 
 	/* Updated value: epoch and ncached */
-	new_val = val + ACACHE_EPOCH_INC - n_alloc;
-	cas_fail = atomic_cas_uint64(&cbin->data, val, new_val);
+	if (low_water <= ncached - n_alloc) {
+		new_val = val + ACACHE_EPOCH_INC - n_alloc;
+	} else {
+		/* Need to update low_water as well. */
+		low_water = ncached = ncached - n_alloc;
+		new_val = cbin_info_pack(val, ncached, low_water, false);
+	}
+	cas_fail = cbin_info_update(cbin, val, new_val);
 	if (unlikely(cas_fail)) {
 		assert((ACCESS_ONCE(cbin->data) >> ACACHE_EPOCH_OFF) !=
 		    (val >> ACACHE_EPOCH_OFF));
@@ -1619,18 +1664,23 @@ JEMALLOC_ALWAYS_INLINE void *
 cbin_alloc(arena_cache_bin_t *cbin)
 {
 	uint64_t val, new_val;
-	size_t ncached;
+	size_t ncached, low_water;
 	bool cas_fail, locked;
 	void *ret;
 retry:
-	val = cbin_info_get(cbin, &ncached, &locked);
+	val = cbin_info_get(cbin, &ncached, &low_water, &locked);
 	if (locked || (ncached == 0))
 		return 0;
 
 	ret = cbin->avail[ncached - 1];
 	/* Updated value: epoch and ncache */
-	new_val = val + ACACHE_EPOCH_INC - 1;
-	cas_fail = atomic_cas_uint64(&cbin->data, val, new_val);
+	if (low_water <= ncached - 1) {
+		new_val = val + ACACHE_EPOCH_INC - 1;
+	} else {
+		low_water = ncached = ncached - 1;
+		new_val = cbin_info_pack(val, ncached, low_water, false);
+	}
+	cas_fail = cbin_info_update(cbin, val, new_val);
 	if (unlikely(cas_fail)) {
 		assert((ACCESS_ONCE(cbin->data) >> ACACHE_EPOCH_OFF) !=
 		    (val >> ACACHE_EPOCH_OFF));
@@ -1703,6 +1753,7 @@ arena_cache_stats_merge_locked(arena_t *arena, arena_bin_t *bin,
 		atomic_sub_uint64(&cbin->queued_nrequests, queued_nrequests);
 
 		if (is_large) {
+			assert(binind >= NBINS);
 			arena->stats.nrequests_large += nrequests + queued_nrequests;
 			arena->stats.lstats[binind - NBINS].nrequests +=
 				nrequests + queued_nrequests;
@@ -1721,10 +1772,12 @@ arena_cache_flush(tsdn_t *tsdn, arena_t *arena, arena_bin_t *bin,
 		uint64_t nrequests, const bool is_large)
 {
 
-	if (is_large)
+	if (is_large) {
+		assert(binind >= NBINS);
 		malloc_mutex_lock(tsdn, &arena->lock);
-	else
+	} else {
 		malloc_mutex_lock(tsdn, &bin->lock);
+	}
 	if (config_stats) {
 		arena_cache_stats_merge_locked(arena, bin, cbin, binind, nrequests,
 		    is_large);
@@ -1757,10 +1810,11 @@ arena_cache_dalloc(tsdn_t *tsdn, arena_t *arena, void **items,
 	arena_cache_bin_t *cbin = &arena->acache->cbins[binind];
 	uint64_t val, new_val;
 	size_t ncached;
+	UNUSED size_t low_water;
 	bool cas_fail, bin_locked = false;
 
 retry:
-	val = cbin_info_get(cbin, &ncached, &bin_locked);
+	val = cbin_info_get(cbin, &ncached, &low_water, &bin_locked);
 	if (bin_locked) {
 		/* Flush back to arena if acache is locked. */
 		arena_cache_flush(tsdn, arena, bin, cbin, items, n_items, binind,
@@ -1768,7 +1822,7 @@ retry:
 		return;
 	}
 
-	new_val = (val + ACACHE_EPOCH_INC) | ACACHE_LOCKBIT;
+	new_val = cbin_info_lock_val(val);
 	assert(n_items <= arena_cache_bin_info[binind].ncached_max);
 	if (ncached + n_items > arena_cache_bin_info[binind].ncached_max) {
 		/* We need to flush some items back to arena. */
@@ -1787,7 +1841,7 @@ retry:
 		 * locking the cbin here. However it requires additional memcpy.
 		 */
 		/* lock the cache bin */
-		cas_fail = atomic_cas_uint64(&cbin->data, val, new_val);
+		cas_fail = cbin_info_update(cbin, val, new_val);
 		if (unlikely(cas_fail)) {
 			goto retry;
 		}
@@ -1804,7 +1858,7 @@ retry:
 	assert(ncached + n_items <= arena_cache_bin_info[binind].ncached_max);
 	if (!bin_locked) {
 		/* lock the cache bin */
-		cas_fail = atomic_cas_uint64(&cbin->data, val, new_val);
+		cas_fail = cbin_info_update(cbin, val, new_val);
 		if (unlikely(cas_fail)) {
 			goto retry;
 		}
