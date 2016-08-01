@@ -1506,7 +1506,7 @@ void arena_cache_gc(tsdn_t *tsdn, arena_t *arena)
 	uint64_t val, new_val;
 	size_t low_water, ncached;
 	unsigned gc_bin;
-	bool locked;
+	bool locked, cas_fail;
 
 	gc_bin = atomic_add_u(&(arena->acache->next_gc_bin), 1) % nhbins;
 	cbin = &arena->acache->cbins[gc_bin];
@@ -1516,8 +1516,6 @@ void arena_cache_gc(tsdn_t *tsdn, arena_t *arena)
 		return;
 	}
 	if (low_water > 0) {
-		bool cas_fail;
-
 		new_val = cbin_info_lock_val(val);
 		/* Lock the bin before flushing. */
 		cas_fail = cbin_info_update(cbin, val, new_val);
@@ -1530,12 +1528,14 @@ void arena_cache_gc(tsdn_t *tsdn, arena_t *arena)
 		    &cbin->avail[ncached - low_water], low_water, gc_bin, 0,
 		    gc_bin >= NBINS ? true : false);
 		val = new_val;
+		ncached = ncached - low_water;
 		/* Fall through to update low_water and unlock. */
 	}
 
 	low_water = ncached;
 	new_val = cbin_info_pack(val, ncached, low_water, false);
-	cbin_info_update(cbin, val, new_val);
+	cas_fail = cbin_info_update(cbin, val, new_val);
+	assert(!cas_fail);
 }
 
 void
@@ -1544,10 +1544,6 @@ arena_maybe_purge(tsdn_t *tsdn, arena_t *arena)
 	/* Don't recursively purge. */
 	if (arena->purging)
 		return;
-
-	if (config_acache) {
-		arena_cache_gc(tsdn, arena);
-	}
 
 	if (opt_purge == purge_mode_ratio)
 		arena_maybe_purge_ratio(tsdn, arena);
@@ -2890,7 +2886,7 @@ arena_prof_promoted(tsdn_t *tsdn, const void *ptr, size_t size)
 	assert(ptr != NULL);
 	assert(CHUNK_ADDR2BASE(ptr) != ptr);
 	assert(isalloc(tsdn, ptr, false) == LARGE_MINCLASS);
-//	assert(isalloc(tsdn, ptr, true) == LARGE_MINCLASS);
+	assert(isalloc(tsdn, ptr, true) == LARGE_MINCLASS);
 	assert(size <= SMALL_MAXCLASS);
 
 	chunk = (arena_chunk_t *)CHUNK_ADDR2BASE(ptr);

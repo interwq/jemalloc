@@ -70,6 +70,10 @@ tcache_event_hard(tsd_t *tsd, tcache_t *tcache)
 	tcache->next_gc_bin++;
 	if (tcache->next_gc_bin == nhbins)
 		tcache->next_gc_bin = 0;
+
+	if (config_acache) {
+		arena_cache_gc(tsd_tsdn(tsd), arena_choose(tsd, NULL));
+	}
 }
 
 void *
