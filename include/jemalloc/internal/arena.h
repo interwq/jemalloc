@@ -48,6 +48,7 @@ typedef struct arena_tdata_s arena_tdata_t;
 typedef struct arena_cache_s arena_cache_t;
 typedef struct arena_cache_bin_s arena_cache_bin_t;
 typedef struct arena_cache_bin_info_s arena_cache_bin_info_t;
+typedef uint64_t acache_state_t;
 
 
 #endif /* JEMALLOC_H_TYPES */
@@ -311,7 +312,7 @@ struct arena_cache_bin_s {
 	 * +---------------------------------------------------+
 	 * The single bit lock is used for cache_free.
 	 */
-	uint64_t    data;
+	acache_state_t    data;
 
 	/* Queued stats updated w/ atomics. */
 	uint64_t    queued_nflushes;
@@ -1572,59 +1573,117 @@ arena_sdalloc(tsdn_t *tsdn, void *ptr, size_t size, tcache_t *tcache,
 		huge_dalloc(tsdn, ptr);
 }
 
-JEMALLOC_ALWAYS_INLINE uint64_t
-cbin_info_get(arena_cache_bin_t *cbin, size_t *ncached, size_t *low_water,
+JEMALLOC_ALWAYS_INLINE acache_state_t
+cbin_state_get(arena_cache_bin_t *cbin, size_t *ncached, size_t *low_water,
     bool *locked)
 {
-	uint64_t val = ACCESS_ONCE(cbin->data);
+	acache_state_t state = ACCESS_ONCE(cbin->data);
 
-	if (val & ACACHE_LOCKBIT)
+	if (state & ACACHE_LOCKBIT)
 		*locked = true;
 	else
 		*locked = false;
 
-	*ncached = val & ACACHE_NCACHED_MASK;
-	*low_water = (val >> ACACHE_NCACHED_BITS) & ACACHE_NCACHED_MASK;
+	*ncached = state & ACACHE_NCACHED_MASK;
+	*low_water = (state >> ACACHE_NCACHED_BITS) & ACACHE_NCACHED_MASK;
 	assert(*low_water <= *ncached);
 
-	return val;
-}
-
-JEMALLOC_ALWAYS_INLINE uint64_t
-cbin_info_lock_val(const uint64_t val)
-{
- return (val + ACACHE_EPOCH_INC) | ACACHE_LOCKBIT;
+	return state;
 }
 
 JEMALLOC_ALWAYS_INLINE bool
-cbin_info_update(arena_cache_bin_t *cbin, const uint64_t old_val,
-    const uint64_t new_val)
+cbin_state_commit(arena_cache_bin_t *cbin, const acache_state_t old_state,
+    const acache_state_t new_state)
 {
 	UNUSED unsigned ncached, low_water;
 
-	ncached = new_val & ACACHE_NCACHED_MASK;
-	low_water = (new_val >> ACACHE_NCACHED_BITS) & ACACHE_NCACHED_MASK;
+	ncached = new_state & ACACHE_NCACHED_MASK;
+	low_water = (new_state >> ACACHE_NCACHED_BITS) & ACACHE_NCACHED_MASK;
 	assert(low_water <= ncached);
 
-	return atomic_cas_uint64(&cbin->data, old_val, new_val);
+	return atomic_cas_uint64(&cbin->data, old_state, new_state);
 }
 
-JEMALLOC_ALWAYS_INLINE uint64_t
-cbin_info_pack(const uint64_t val, const size_t ncached,
+JEMALLOC_ALWAYS_INLINE acache_state_t
+cbin_state_adjust(const acache_state_t state, const int ncached_diff,
+    const bool epoch_inc)
+{
+
+	if (ncached_diff < 0) {
+		assert((int)(state & ACACHE_NCACHED_MASK) > -ncached_diff);
+	}
+
+	return state + ncached_diff + (epoch_inc ? ACACHE_EPOCH_INC : 0);
+}
+
+JEMALLOC_ALWAYS_INLINE acache_state_t
+cbin_get_lock_state(const acache_state_t state)
+{
+
+	assert(!(state & ACACHE_LOCKBIT));
+	return cbin_state_adjust(state, 0, true) | ACACHE_LOCKBIT;
+}
+
+JEMALLOC_ALWAYS_INLINE bool
+cbin_lock(arena_cache_bin_t *cbin, acache_state_t *state)
+{
+	acache_state_t new_state, old_state;
+	bool cas_fail;
+
+	old_state = *state;
+	assert(!(old_state & ACACHE_LOCKBIT));
+
+	new_state = cbin_get_lock_state(old_state);
+	cas_fail = cbin_state_commit(cbin, old_state, new_state);
+	if (!cas_fail)
+		*state = new_state;
+
+	return cas_fail;
+}
+
+JEMALLOC_ALWAYS_INLINE bool
+cbin_lock_and_get_info(arena_cache_bin_t *cbin, acache_state_t *state,
+    size_t *ncached, size_t *low_water)
+{
+	bool bin_locked, cas_fail;
+label_retry:
+	*state = cbin_state_get(cbin, ncached, low_water, &bin_locked);
+	if (bin_locked) {
+		return true;
+	}
+
+	/* Try locking the cache bin */
+	cas_fail = cbin_lock(cbin, state);
+	if (unlikely(cas_fail))
+		goto label_retry;
+
+	return false;
+}
+
+JEMALLOC_ALWAYS_INLINE void
+cbin_unlock(arena_cache_bin_t *cbin, const acache_state_t state)
+{
+
+	ACCESS_ONCE(cbin->data) = state & ~ACACHE_LOCKBIT;
+}
+
+JEMALLOC_ALWAYS_INLINE acache_state_t
+cbin_state_pack(const acache_state_t state, const size_t ncached,
     const size_t low_water, const bool locked)
 {
-	uint64_t new_val, epoch;
+	acache_state_t new_state;
+	uint64_t epoch;
 
-	/* Update epoch when getting the new value. */
-	epoch = (val >> ACACHE_EPOCH_OFF) + 1;
-	new_val = (epoch << ACACHE_EPOCH_OFF) | ncached |
+	/* Update epoch when getting the new state. */
+	epoch = (state >> ACACHE_EPOCH_OFF) + 1;
+	new_state = (epoch << ACACHE_EPOCH_OFF) | ncached |
 		(low_water << ACACHE_NCACHED_BITS);
 
 	if (locked) {
-		new_val |= ACACHE_LOCKBIT;
+		new_state |= ACACHE_LOCKBIT;
 	}
 
-	return new_val;
+	return new_state;
 }
 
 /* Return number of items allocated */
@@ -1632,11 +1691,11 @@ JEMALLOC_ALWAYS_INLINE size_t
 cbin_alloc_to_tbin(arena_cache_bin_t *cbin, tcache_bin_t *tbin,
     unsigned n_alloc)
 {
-	uint64_t val, new_val;
+	acache_state_t state, new_state;
 	size_t ncached, low_water;
 	bool cas_fail, locked;
-retry:
-	val = cbin_info_get(cbin, &ncached, &low_water, &locked);
+label_retry:
+	state = cbin_state_get(cbin, &ncached, &low_water, &locked);
 	if (locked || (ncached == 0))
 		return 0;
 
@@ -1646,20 +1705,19 @@ retry:
 	memcpy(&tbin->avail[-(int)n_alloc], &cbin->avail[ncached - n_alloc],
 	    sizeof(void *) * n_alloc);
 
-	/* Updated value: epoch and ncached */
+	/* Update state and low_water if necessary */
 	if (low_water <= ncached - n_alloc) {
-		new_val = val + ACACHE_EPOCH_INC - n_alloc;
+		new_state = cbin_state_adjust(state, -n_alloc, true);
 	} else {
-		/* Need to update low_water as well. */
 		low_water = ncached = ncached - n_alloc;
-		new_val = cbin_info_pack(val, ncached, low_water, false);
+		new_state = cbin_state_pack(state, ncached, low_water, false);
 	}
 
-	cas_fail = cbin_info_update(cbin, val, new_val);
+	cas_fail = cbin_state_commit(cbin, state, new_state);
 	if (unlikely(cas_fail)) {
 		assert((ACCESS_ONCE(cbin->data) >> ACACHE_EPOCH_OFF) !=
-		    (val >> ACACHE_EPOCH_OFF));
-		goto retry;
+		    (state >> ACACHE_EPOCH_OFF));
+		goto label_retry;
 	}
 	assert(tbin->avail[-(int)n_alloc] && tbin->avail[-1]);
 
@@ -1673,28 +1731,28 @@ retry:
 JEMALLOC_ALWAYS_INLINE void *
 cbin_alloc(arena_cache_bin_t *cbin)
 {
-	uint64_t val, new_val;
+	acache_state_t state, new_state;
 	size_t ncached, low_water;
 	bool cas_fail, locked;
 	void *ret;
-retry:
-	val = cbin_info_get(cbin, &ncached, &low_water, &locked);
+label_retry:
+	state = cbin_state_get(cbin, &ncached, &low_water, &locked);
 	if (locked || (ncached == 0))
 		return 0;
 
 	ret = cbin->avail[ncached - 1];
-	/* Updated value: epoch and ncache */
+	/* Update state and low_water if necessary. */
 	if (low_water <= ncached - 1) {
-		new_val = val + ACACHE_EPOCH_INC - 1;
+		new_state = cbin_state_adjust(state, -1, true);
 	} else {
 		low_water = ncached = ncached - 1;
-		new_val = cbin_info_pack(val, ncached, low_water, false);
+		new_state = cbin_state_pack(state, ncached, low_water, false);
 	}
-	cas_fail = cbin_info_update(cbin, val, new_val);
+	cas_fail = cbin_state_commit(cbin, state, new_state);
 	if (unlikely(cas_fail)) {
 		assert((ACCESS_ONCE(cbin->data) >> ACACHE_EPOCH_OFF) !=
-		    (val >> ACACHE_EPOCH_OFF));
-		goto retry;
+		    (state >> ACACHE_EPOCH_OFF));
+		goto label_retry;
 	}
 
 	return ret;
@@ -1778,18 +1836,11 @@ arena_cache_stats_merge_locked(arena_t *arena, arena_bin_t *bin,
 }
 
 JEMALLOC_ALWAYS_INLINE void
-arena_cache_flush(tsdn_t *tsdn, arena_t *arena, arena_bin_t *bin,
+arena_cache_flush_locked(tsdn_t *tsdn, arena_t *arena, arena_bin_t *bin,
 		arena_cache_bin_t *cbin, void **items, size_t n_items, szind_t binind,
 		uint64_t nrequests, const bool is_large)
 {
 
-	if (is_large) {
-		assert(binind >= NBINS);
-		malloc_mutex_lock(tsdn, &arena->lock);
-	} else {
-		assert(binind < NBINS);
-		malloc_mutex_lock(tsdn, &bin->lock);
-	}
 	if (config_stats) {
 		arena_cache_stats_merge_locked(arena, bin, cbin, binind, nrequests,
 		    is_large);
@@ -1808,6 +1859,25 @@ arena_cache_flush(tsdn_t *tsdn, arena_t *arena, arena_bin_t *bin,
 			arena_dalloc_bin_junked_locked(tsdn, arena, chunk, ptr, bitselm);
 		}
 	}
+}
+
+JEMALLOC_ALWAYS_INLINE void
+arena_cache_flush(tsdn_t *tsdn, arena_t *arena, arena_bin_t *bin,
+		arena_cache_bin_t *cbin, void **items, size_t n_items, szind_t binind,
+		uint64_t nrequests, const bool is_large)
+{
+
+	if (is_large) {
+		assert(binind >= NBINS);
+		malloc_mutex_lock(tsdn, &arena->lock);
+	} else {
+		assert(binind < NBINS);
+		malloc_mutex_lock(tsdn, &bin->lock);
+	}
+
+	arena_cache_flush_locked(tsdn, arena, bin, cbin, items, n_items, binind,
+	    nrequests, is_large);
+
 	if (is_large)
 		malloc_mutex_unlock(tsdn, &arena->lock);
 	else
@@ -1820,67 +1890,69 @@ arena_cache_dalloc(tsdn_t *tsdn, arena_t *arena, void **items,
 {
 	arena_bin_t *bin = &arena->bins[binind];
 	arena_cache_bin_t *cbin = &arena->acache->cbins[binind];
-	uint64_t val, new_val;
+	acache_state_t state;
 	size_t ncached, low_water;
-	bool cas_fail, bin_locked = false;
 
-retry:
-	val = cbin_info_get(cbin, &ncached, &low_water, &bin_locked);
-	if (binind < ACACHE_MIN_IND || bin_locked) {
+	if (cbin_lock_and_get_info(cbin, &state, &ncached, &low_water)) {
 		/* Flush back to arena if acache is locked. */
 		arena_cache_flush(tsdn, arena, bin, cbin, items, n_items, binind,
 		    nrequests, is_large);
 		return;
 	}
 
-	new_val = cbin_info_lock_val(val);
 	assert(n_items <= arena_cache_bin_info[binind].ncached_max);
+	/* Check if need to flush some items back to arena. */
 	if (ncached + n_items > arena_cache_bin_info[binind].ncached_max) {
-		/* We need to flush some items back to arena. */
 		size_t nkeep, nflush;
+
+		if (binind < ACACHE_MIN_IND) {
+			assert(!is_large);
+
+			/* Flush everything (not reusing them). Basically batching the flush. */
+			malloc_mutex_lock(tsdn, &bin->lock);
+			arena_cache_flush_locked(tsdn, arena, bin, cbin, items, n_items, binind,
+			    nrequests, false);
+			arena_cache_flush_locked(tsdn, arena, bin, cbin, cbin->avail, ncached,
+			    binind, 0, false);
+			malloc_mutex_unlock(tsdn, &bin->lock);
+			/* Simple unlock and return in this case. */
+			cbin_unlock(cbin, cbin_state_pack(state, 0, 0, false));
+
+			return;
+		}
+
 		if (n_items >= arena_cache_bin_info[binind].flush_remain) {
 			nkeep = 0;
 		} else {
 			nkeep = arena_cache_bin_info[binind].flush_remain - n_items;
 		}
-		/* After flushing back to arena, and return the n_items to acache, we leave
-		 * flush_remain items in acache. */
+		/*
+		 * After flushing back to arena, and return the n_items to acache, we leave
+		 * flush_remain items in acache.
+		 */
 		nflush = ncached - nkeep;
 		assert(nkeep < ncached);
 
 		/*
 		 * If we use cbin_alloc to get items from the cbin, it's possible to avoid
-		 * locking the cbin here. However it requires additional memcpy.
+		 * locking the cbin while flushing to arena. However it requires additional
+		 * memcpy in that case.
 		 */
-		/* lock the cache bin */
-		cas_fail = cbin_info_update(cbin, val, new_val);
-		if (unlikely(cas_fail)) {
-			goto retry;
-		}
-		bin_locked = true;
 		arena_cache_flush(tsdn, arena, bin, cbin, &cbin->avail[nkeep],
 		    nflush, binind, nrequests, is_large);
 
-		/* Update new_val which will be used for unlocking. */
+		/* Update state which will be used for unlocking. */
 		ncached = nkeep;
 		if (low_water > nkeep + n_items) {
 			low_water = nkeep + n_items;
 			/* ncached will be adjusted when commiting */
-			new_val = cbin_info_pack(new_val, ncached, low_water, true);
+			state = cbin_state_pack(state, ncached, low_water, true);
 		} else {
-			new_val -= nflush;
+			state = cbin_state_adjust(state, -nflush, false);
 		}
 		/* Fall through to free to cbin and unlock. */
 	}
-
 	assert(ncached + n_items <= arena_cache_bin_info[binind].ncached_max);
-	if (!bin_locked) {
-		/* lock the cache bin */
-		cas_fail = cbin_info_update(cbin, val, new_val);
-		if (unlikely(cas_fail)) {
-			goto retry;
-		}
-	}
 
 	/*
 	 * Do the memcpy, then release the bitlock & update ncached in a single
@@ -1888,13 +1960,12 @@ retry:
 	 */
 	memcpy(&cbin->avail[ncached], items, sizeof(void *) * n_items);
 	cc_barrier(); /* For x86, compiler barrier is sufficient. */
-	/* Release the bitlock, and increment ncached. */
 	assert(cbin->avail[ncached + n_items - 1]);
-	assert((new_val & ACACHE_NCACHED_MASK) <=
+	assert((state & ACACHE_NCACHED_MASK) <=
 	    arena_cache_bin_info[binind].ncached_max);
 
-	/* Atomic store to commit the change. */
-	cbin->data = (new_val & ~ACACHE_LOCKBIT) + n_items;
+	/* Release the bitlock, and adjust ncached. */
+	cbin_unlock(cbin, cbin_state_adjust(state, n_items, false));
 }
 
 #  endif /* JEMALLOC_ARENA_INLINE_B */

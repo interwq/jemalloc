@@ -82,7 +82,11 @@ tcache_alloc_small_hard(tsdn_t *tsdn, arena_t *arena, tcache_t *tcache,
 {
 	void *ret;
 
-	if (config_acache) {
+	/*
+	 * Reusing small items (cacheline granularity) from acache may cause
+	 * serious fragmentation and false sharing. Bypass such cases.
+	 */
+	if (config_acache && binind >= ACACHE_MIN_IND) {
 		/* arena_cache_alloc will fill for us if necessary. */
 		arena_cache_alloc_small(tsdn, arena, tcache, tbin, binind);
 	} else {

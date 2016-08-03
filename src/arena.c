@@ -1503,23 +1503,20 @@ arena_maybe_purge_decay(tsdn_t *tsdn, arena_t *arena)
 void arena_cache_gc(tsdn_t *tsdn, arena_t *arena)
 {
 	arena_cache_bin_t *cbin;
-	uint64_t val, new_val;
+	acache_state_t state, new_state;
 	size_t low_water, ncached;
 	unsigned gc_bin;
-	bool locked, cas_fail;
+	bool locked;
 
 	gc_bin = atomic_add_u(&(arena->acache->next_gc_bin), 1) % nhbins;
 	cbin = &arena->acache->cbins[gc_bin];
 
-	val = cbin_info_get(cbin, &ncached, &low_water, &locked);
-	if (locked) {
+	state = cbin_state_get(cbin, &ncached, &low_water, &locked);
+	if (locked)
 		return;
-	}
+
 	if (low_water > 0) {
-		new_val = cbin_info_lock_val(val);
-		/* Lock the bin before flushing. */
-		cas_fail = cbin_info_update(cbin, val, new_val);
-		if (unlikely(cas_fail)) {
+		if (cbin_lock(cbin, &state)) {
 			return;
 		}
 
@@ -1527,20 +1524,19 @@ void arena_cache_gc(tsdn_t *tsdn, arena_t *arena)
 		arena_cache_flush(tsdn, arena, &arena->bins[gc_bin], cbin,
 		    &cbin->avail[ncached - low_water], low_water, gc_bin, 0,
 		    gc_bin >= NBINS ? true : false);
-		val = new_val;
 		ncached = ncached - low_water;
 		/* Fall through to update low_water and unlock. */
 	}
 
 	low_water = ncached;
-	new_val = cbin_info_pack(val, ncached, low_water, false);
-	cas_fail = cbin_info_update(cbin, val, new_val);
-	assert(!cas_fail);
+	new_state = cbin_state_pack(state, ncached, low_water, false);
+	cbin_state_commit(cbin, state, new_state);
 }
 
 void
 arena_maybe_purge(tsdn_t *tsdn, arena_t *arena)
 {
+
 	/* Don't recursively purge. */
 	if (arena->purging)
 		return;
@@ -2465,15 +2461,14 @@ arena_tcache_fill_small(tsdn_t *tsdn, arena_t *arena, tcache_bin_t *tbin,
 	}
 #ifdef ACACHE_FILL
 	{
-		uint64_t val, new_val;
+		acache_state_t state;
 		arena_cache_bin_t *cbin = &arena->acache->cbins[binind];
-		size_t ncached;
+		size_t ncached, low_water;
+		bool bin_locked;
 
-		val = ACCESS_ONCE(cbin->data);
-		ncached = val & ACACHE_NCACHE_MASK;
-		if (!(val & ACACHE_LOCKBIT) && !ncached) {
-			new_val = cbin_info_lock_val(val);
-			if (likely(!atomic_cas_uint64(&cbin->data, val, new_val))) {
+		state = cbin_state_get(cbin, &ncached, &low_water, &bin_locked);
+		if (!bin_locked && !ncached) {
+			if (!cbin_lock(cbin, &state)) {
 				unsigned j;
 				for (j = 0, nfill = (arena_cache_bin_info[binind].ncached_max >> 4);
 						 j < nfill; j++) {
@@ -2498,7 +2493,7 @@ arena_tcache_fill_small(tsdn_t *tsdn, arena_t *arena, tcache_bin_t *tbin,
 					bin->stats.curregs += j;
 				}
 				/* Unlock the bin and update ncached. */
-				cbin->data = val + ACACHE_EPOCH_INC + j;
+				cbin_unlock(cbin, cbin_state_adjust(state, j, false));
 			}
 		}
 	}
