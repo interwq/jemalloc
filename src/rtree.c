@@ -142,6 +142,7 @@ rtree_node_init(tsdn_t *tsdn, rtree_t *rtree, unsigned level,
 		 */
 		do {
 			CPU_SPINWAIT;
+			usleep(1000);
 			node = atomic_read_p((void **)elmp);
 		} while (node == RTREE_NODE_INITIALIZING);
 	} else {

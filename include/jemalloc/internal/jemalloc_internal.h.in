@@ -471,6 +471,7 @@ void	jemalloc_postfork_child(void);
 JEMALLOC_ALWAYS_INLINE void *
 arena_cache_alloc_large(tsdn_t *tsdn, arena_t *arena, szind_t binind,
     size_t usize, bool zero);
+void arena_cache_gc(tsdn_t *tsdn, arena_t *arena);
 
 #include "jemalloc/internal/nstime.h"
 #include "jemalloc/internal/util.h"
