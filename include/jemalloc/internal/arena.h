@@ -1610,7 +1610,7 @@ cbin_state_adjust(const acache_state_t state, const int ncached_diff,
 {
 
 	if (ncached_diff < 0) {
-		assert((int)(state & ACACHE_NCACHED_MASK) > -ncached_diff);
+		assert((int)(state & ACACHE_NCACHED_MASK) >= -ncached_diff);
 	}
 
 	return state + ncached_diff + (epoch_inc ? ACACHE_EPOCH_INC : 0);
@@ -1816,6 +1816,7 @@ arena_cache_stats_merge_locked(arena_t *arena, arena_bin_t *bin,
 		arena_cache_bin_t *cbin, szind_t binind, uint64_t nrequests,
 		const bool is_large)
 {
+	/* Called w/ arena or bin lock. Thus read + atomic_sub is safe. */
 	uint64_t queued_nrequests = ACCESS_ONCE(cbin->queued_nrequests);
 
 	if (nrequests || queued_nrequests) {
@@ -1862,27 +1863,144 @@ arena_cache_flush_locked(tsdn_t *tsdn, arena_t *arena, arena_bin_t *bin,
 }
 
 JEMALLOC_ALWAYS_INLINE void
+arena_cache_flush_small(tsdn_t *tsdn, arena_t *arena, arena_bin_t *bin,
+		arena_cache_bin_t *cbin, void **items, size_t n_items, szind_t binind,
+		uint64_t nrequests)
+{
+	unsigned i, nflush, ndeferred;
+	void *ptr;
+
+	for (nflush = n_items; nflush > 0; nflush = ndeferred) {
+		/* Process the arena bin associated with the first object. */
+		arena_chunk_t *chunk = (arena_chunk_t *)CHUNK_ADDR2BASE(items[0]);
+		arena_t *bin_arena = extent_node_arena_get(&chunk->node);
+		/* Needed as acache is enabled / disabled. */
+		arena_bin_t *bin = &bin_arena->bins[binind];
+
+		if (config_prof && bin_arena == arena) {
+			/* 	if (arena_prof_accum(tsd_tsdn(tsd), arena, */
+			/* 	    tcache->prof_accumbytes)) */
+			/* 		prof_idump(tsd_tsdn(tsd)); */
+			/* 	tcache->prof_accumbytes = 0; */
+		}
+
+		malloc_mutex_lock(tsdn, &bin->lock);
+		if (config_stats && bin_arena == arena) {
+			arena_cache_stats_merge_locked(arena, bin, cbin, binind, nrequests,
+			    false);
+		}
+
+		ndeferred = 0;
+		for (i = 0; i < nflush; i++) {
+			ptr = items[i];
+			assert(ptr != NULL);
+			chunk = (arena_chunk_t *)CHUNK_ADDR2BASE(ptr);
+			if (extent_node_arena_get(&chunk->node) == bin_arena) {
+				size_t pageind = ((uintptr_t)ptr -
+				    (uintptr_t)chunk) >> LG_PAGE;
+				arena_chunk_map_bits_t *bitselm =
+				    arena_bitselm_get_mutable(chunk, pageind);
+				arena_dalloc_bin_junked_locked(tsdn, bin_arena, chunk, ptr, bitselm);
+			} else {
+				/*
+				 * This object was allocated via a different
+				 * arena bin than the one that is currently
+				 * locked.  Stash the object, so that it can be
+				 * handled in a future pass.
+				 */
+				items[ndeferred++] = ptr;
+			}
+		}
+
+		malloc_mutex_unlock(tsdn, &bin->lock);
+		arena_decay_ticks(tsdn, bin_arena, nflush - ndeferred);
+	}
+}
+
+JEMALLOC_ALWAYS_INLINE void
+arena_cache_flush_large(tsdn_t *tsdn, arena_t *arena, arena_bin_t *bin,
+		arena_cache_bin_t *cbin, void **items, size_t n_items, szind_t binind,
+		uint64_t nrequests)
+{
+	unsigned i, nflush, ndeferred;
+	void *ptr;
+
+	for (nflush = n_items; nflush > 0; nflush = ndeferred) {
+		/* Process the arena associated with the first object. */
+		arena_chunk_t *chunk = (arena_chunk_t *)CHUNK_ADDR2BASE(items[0]);
+		arena_t *bin_arena = extent_node_arena_get(&chunk->node);
+
+		malloc_mutex_lock(tsdn, &bin_arena->lock);
+
+		if (config_stats && bin_arena == arena) {
+			arena_cache_stats_merge_locked(arena, bin, cbin, binind, nrequests,
+			   true);
+		}
+		if ((config_prof || config_stats) && bin_arena == arena) {
+			/* 	if (config_prof) { */
+			/* 		idump = arena_prof_accum_locked(arena, */
+			/* 		    tcache->prof_accumbytes); */
+			/* 		tcache->prof_accumbytes = 0; */
+			/* 	} */
+		}
+
+		ndeferred = 0;
+		for (i = 0; i < nflush; i++) {
+			ptr = items[i];
+			assert(ptr != NULL);
+			chunk = (arena_chunk_t *)CHUNK_ADDR2BASE(ptr);
+			if (extent_node_arena_get(&chunk->node) == bin_arena) {
+				arena_dalloc_large_junked_locked(tsdn,
+				    bin_arena, chunk, ptr);
+			} else {
+				/*
+				 * This object was allocated via a different
+				 * arena than the one that is currently locked.
+				 * Stash the object, so that it can be handled
+				 * in a future pass.
+				 */
+				items[ndeferred++] = ptr;
+			}
+		}
+		malloc_mutex_unlock(tsdn, &bin_arena->lock);
+
+		/* if (config_prof && idump) */
+		/* 	prof_idump(tsd_tsdn(tsd)); */
+		arena_decay_ticks(tsdn, bin_arena, nflush - ndeferred);
+	}
+}
+
+JEMALLOC_ALWAYS_INLINE void
 arena_cache_flush(tsdn_t *tsdn, arena_t *arena, arena_bin_t *bin,
 		arena_cache_bin_t *cbin, void **items, size_t n_items, szind_t binind,
 		uint64_t nrequests, const bool is_large)
 {
 
 	if (is_large) {
-		assert(binind >= NBINS);
-		malloc_mutex_lock(tsdn, &arena->lock);
+		arena_cache_flush_large(tsdn, arena, bin, cbin, items, n_items, binind,
+	    nrequests);
 	} else {
-		assert(binind < NBINS);
-		malloc_mutex_lock(tsdn, &bin->lock);
+		arena_cache_flush_small(tsdn, arena, bin, cbin, items, n_items, binind,
+	    nrequests);
 	}
 
-	arena_cache_flush_locked(tsdn, arena, bin, cbin, items, n_items, binind,
-	    nrequests, is_large);
+	/* if (is_large) { */
+	/* 	assert(binind >= NBINS); */
+	/* 	malloc_mutex_lock(tsdn, &arena->lock); */
+	/* } else { */
+	/* 	assert(binind < NBINS); */
+	/* 	malloc_mutex_lock(tsdn, &bin->lock); */
+	/* } */
 
-	if (is_large)
-		malloc_mutex_unlock(tsdn, &arena->lock);
-	else
-		malloc_mutex_unlock(tsdn, &bin->lock);
+	/* arena_cache_flush_locked(tsdn, arena, bin, cbin, items, n_items, binind, */
+	/*     nrequests, is_large); */
+
+	/* if (is_large) */
+	/* 	malloc_mutex_unlock(tsdn, &arena->lock); */
+	/* else */
+	/* 	malloc_mutex_unlock(tsdn, &bin->lock); */
 }
+
 
 JEMALLOC_ALWAYS_INLINE void
 arena_cache_dalloc(tsdn_t *tsdn, arena_t *arena, void **items,
@@ -1902,7 +2020,10 @@ arena_cache_dalloc(tsdn_t *tsdn, arena_t *arena, void **items,
 
 	assert(n_items <= arena_cache_bin_info[binind].ncached_max);
 	/* Check if need to flush some items back to arena. */
-	if (ncached + n_items > arena_cache_bin_info[binind].ncached_max) {
+	if (ncached + n_items <= arena_cache_bin_info[binind].ncached_max) {
+		/* Queue the stats update as we are not going to lock the arena. */
+		arena_cache_merge_stats(arena, binind, nrequests);
+	} else {
 		size_t nkeep, nflush;
 
 		if (binind < ACACHE_MIN_IND) {
@@ -1910,10 +2031,10 @@ arena_cache_dalloc(tsdn_t *tsdn, arena_t *arena, void **items,
 
 			/* Flush everything (not reusing them). Basically batching the flush. */
 			malloc_mutex_lock(tsdn, &bin->lock);
-			arena_cache_flush_locked(tsdn, arena, bin, cbin, items, n_items, binind,
-			    nrequests, false);
-			arena_cache_flush_locked(tsdn, arena, bin, cbin, cbin->avail, ncached,
-			    binind, 0, false);
+			arena_cache_flush_small(tsdn, arena, bin, cbin, items, n_items, binind,
+			    nrequests);
+			arena_cache_flush_small(tsdn, arena, bin, cbin, cbin->avail, ncached,
+			    binind, 0);
 			malloc_mutex_unlock(tsdn, &bin->lock);
 			/* Simple unlock and return in this case. */
 			cbin_unlock(cbin, cbin_state_pack(state, 0, 0, false));

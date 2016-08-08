@@ -106,15 +106,24 @@ tcache_bin_flush_small(tsd_t *tsd, tcache_t *tcache, tcache_bin_t *tbin,
     szind_t binind, unsigned rem)
 {
 	arena_t *arena;
-	void *ptr;
-	unsigned i, nflush, ndeferred;
-	bool merged_stats = false;
+	UNUSED void *ptr;
+	UNUSED unsigned i, nflush, ndeferred;
+	UNUSED bool merged_stats = false;
 
 	assert(binind < NBINS);
 	assert(rem <= tbin->ncached);
 
 	arena = arena_choose(tsd, NULL);
 	assert(arena != NULL);
+
+#define ACACHE_ARENA__
+#ifdef ACACHE_ARENA__
+	nflush = tbin->ncached - rem;
+	if (nflush > 0) {
+		arena_cache_dalloc(tsd_tsdn(tsd), arena, tbin->avail - nflush, nflush, binind,
+		    tbin->tstats.nrequests, false);
+	}
+#else
 	for (nflush = tbin->ncached - rem; nflush > 0; nflush = ndeferred) {
 		/* Process the arena bin associated with the first object. */
 		arena_chunk_t *chunk = (arena_chunk_t *)CHUNK_ADDR2BASE(
@@ -198,6 +207,7 @@ tcache_bin_flush_small(tsd_t *tsd, tcache_t *tcache, tcache_bin_t *tbin,
 			malloc_mutex_unlock(tsd_tsdn(tsd), &bin->lock);
 		}
 	}
+#endif
 	tbin->tstats.nrequests = 0;
 
 	memmove(tbin->avail - rem, tbin->avail - tbin->ncached, rem *
@@ -212,15 +222,24 @@ tcache_bin_flush_large(tsd_t *tsd, tcache_bin_t *tbin, szind_t binind,
     unsigned rem, tcache_t *tcache)
 {
 	arena_t *arena;
-	void *ptr;
-	unsigned i, nflush, ndeferred;
-	bool merged_stats = false;
+	UNUSED void *ptr;
+	UNUSED unsigned i, nflush, ndeferred;
+	UNUSED bool merged_stats = false;
 
 	assert(binind < nhbins);
 	assert(rem <= tbin->ncached);
 
 	arena = arena_choose(tsd, NULL);
 	assert(arena != NULL);
+
+#define ACACHE_ARENA__
+#ifdef ACACHE_ARENA__
+	nflush = tbin->ncached - rem;
+	if (nflush > 0) {
+		arena_cache_dalloc(tsd_tsdn(tsd), arena, tbin->avail - nflush, nflush, binind,
+	      tbin->tstats.nrequests, true);
+	}
+#else
 	for (nflush = tbin->ncached - rem; nflush > 0; nflush = ndeferred) {
 		/* Process the arena associated with the first object. */
 		arena_chunk_t *chunk = (arena_chunk_t *)CHUNK_ADDR2BASE(
@@ -308,6 +327,7 @@ tcache_bin_flush_large(tsd_t *tsd, tcache_bin_t *tbin, szind_t binind,
 			malloc_mutex_unlock(tsd_tsdn(tsd), &arena->lock);
 		}
 	}
+#endif
 	tbin->tstats.nrequests = 0;
 
 	memmove(tbin->avail - rem, tbin->avail - tbin->ncached, rem *
