@@ -82,14 +82,9 @@ tcache_alloc_small_hard(tsdn_t *tsdn, arena_t *arena, tcache_t *tcache,
 {
 	void *ret;
 
-	/*
-	 * Reusing small items (cacheline granularity) from acache may cause
-	 * serious fragmentation and false sharing. Bypass such cases.
-	 */
-	if (config_acache && binind >= ACACHE_MIN_IND) {
-		/* arena_cache_alloc will fill for us if necessary. */
-		arena_cache_alloc_small(tsdn, arena, tcache, tbin, binind);
-	} else {
+	if (!config_acache ||
+			!arena_cache_alloc_small(tsdn, arena, tcache, tbin, binind)) {
+		/* Acache not available. Fill from arena directly. */
 		arena_tcache_fill_small(tsdn, arena, tbin, binind, config_prof ?
 		    tcache->prof_accumbytes : 0);
 		if (config_prof)
@@ -123,6 +118,14 @@ tcache_bin_flush_small(tsd_t *tsd, tcache_t *tcache, tcache_bin_t *tbin,
 		arena_cache_dalloc(tsd_tsdn(tsd), arena, tbin->avail - nflush, nflush, binind,
 		    tbin->tstats.nrequests, false);
 	}
+	if (config_prof) {
+		if (arena_prof_accum(tsd_tsdn(tsd), arena,
+												 tcache->prof_accumbytes)) {
+				prof_idump(tsd_tsdn(tsd));
+		}
+		tcache->prof_accumbytes = 0;
+	}
+
 #else
 	for (nflush = tbin->ncached - rem; nflush > 0; nflush = ndeferred) {
 		/* Process the arena bin associated with the first object. */
@@ -239,6 +242,14 @@ tcache_bin_flush_large(tsd_t *tsd, tcache_bin_t *tbin, szind_t binind,
 		arena_cache_dalloc(tsd_tsdn(tsd), arena, tbin->avail - nflush, nflush, binind,
 	      tbin->tstats.nrequests, true);
 	}
+	if (config_prof) {
+		if (arena_prof_accum(tsd_tsdn(tsd), arena,
+												 tcache->prof_accumbytes)) {
+				prof_idump(tsd_tsdn(tsd));
+		}
+		tcache->prof_accumbytes = 0;
+	}
+
 #else
 	for (nflush = tbin->ncached - rem; nflush > 0; nflush = ndeferred) {
 		/* Process the arena associated with the first object. */

@@ -14,15 +14,16 @@ malloc_tsd_data(, , tsd_t, TSD_INITIALIZER)
 void *
 malloc_tsd_malloc(size_t size)
 {
+	void *mem = a0malloc(CACHELINE_CEILING(size) + 2 * CACHELINE);
 
-	return (a0malloc(CACHELINE_CEILING(size)));
+	return (void *)((uint64_t)mem + CACHELINE);
 }
 
 void
 malloc_tsd_dalloc(void *wrapper)
 {
 
-	a0dalloc(wrapper);
+	a0dalloc((void *)((uint64_t)wrapper - CACHELINE));
 }
 
 void

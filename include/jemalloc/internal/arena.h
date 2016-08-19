@@ -29,7 +29,7 @@ typedef enum {
 
 	purge_mode_limit = 2
 } purge_mode_t;
-#define	PURGE_DEFAULT		purge_mode_ratio
+#define	PURGE_DEFAULT		purge_mode_decay
 /* Default decay time in seconds. */
 #define	DECAY_TIME_DEFAULT	10
 /* Number of event ticks between time checks. */
@@ -297,7 +297,7 @@ struct arena_bin_s {
 #define ACACHE_NCACHED_MASK (((uint64_t)1 << ACACHE_NCACHED_BITS) - 1)
 /* Currently fixed size. */
 #define ACACHE_TCACHE_RATIO 4
-#define ACACHE_MIN_IND 10
+#define ACACHE_MIN_IND 16
 
 struct arena_cache_bin_info_s {
 	unsigned	ncached_max;	/* Upper limit on ncached. */
@@ -312,13 +312,19 @@ struct arena_cache_bin_s {
 	 * +---------------------------------------------------+
 	 * The single bit lock is used for cache_free.
 	 */
-	acache_state_t    data;
+	acache_state_t		data;
+	void			**avail;	/* Stack of available objects. */
 
 	/* Queued stats updated w/ atomics. */
-	uint64_t    queued_nflushes;
-	uint64_t    queued_nrequests;
+	uint64_t		queued_nflushes;
+	uint64_t		queued_nrequests;
 
-	void		**avail;	/* Stack of available objects. */
+	/*
+	 * For small items (ind < ACACHE_MIN_IND), we maintain the following info and
+	 * only reuse those memory if it's freed by the same thread.
+	 */
+	tsdn_t			*last_thd; 				/* Most recent thread dalloced to acache */
+	uint64_t		n_items_last_thd;	/* # of items freed by last_thd */
 };
 
 struct arena_cache_s {
@@ -735,7 +741,7 @@ size_t	arena_salloc(tsdn_t *tsdn, const void *ptr, bool demote);
 void	arena_dalloc(tsdn_t *tsdn, void *ptr, tcache_t *tcache, bool slow_path);
 void	arena_sdalloc(tsdn_t *tsdn, void *ptr, size_t size, tcache_t *tcache,
     bool slow_path);
-void arena_cache_alloc_small(tsdn_t *tsdn, arena_t *arena, tcache_t *tcache,
+size_t arena_cache_alloc_small(tsdn_t *tsdn, arena_t *arena, tcache_t *tcache,
     tcache_bin_t *tbin, szind_t binind);
 void *arena_cache_alloc_large(tsdn_t *tsdn, arena_t *arena, szind_t binind,
     size_t usize, bool zero);
@@ -1130,12 +1136,16 @@ arena_prof_accum(tsdn_t *tsdn, arena_t *arena, uint64_t accumbytes)
 		return (false);
 
 	{
-		bool ret;
+		uint64_t bytes_updated;
 
-		malloc_mutex_lock(tsdn, &arena->lock);
-		ret = arena_prof_accum_impl(arena, accumbytes);
-		malloc_mutex_unlock(tsdn, &arena->lock);
-		return (ret);
+		bytes_updated = atomic_add_uint64(&arena->prof_accumbytes, accumbytes);
+
+		if (bytes_updated >= prof_interval
+		    && (bytes_updated - accumbytes < prof_interval)) {
+			atomic_sub_uint64(&arena->prof_accumbytes, prof_interval);
+			return (true);
+		}
+		return (false);
 	}
 }
 
@@ -1600,6 +1610,7 @@ cbin_state_commit(arena_cache_bin_t *cbin, const acache_state_t old_state,
 	ncached = new_state & ACACHE_NCACHED_MASK;
 	low_water = (new_state >> ACACHE_NCACHED_BITS) & ACACHE_NCACHED_MASK;
 	assert(low_water <= ncached);
+	assert((uint64_t)(&cbin->data) % sizeof(void *) == 0);
 
 	return atomic_cas_uint64(&cbin->data, old_state, new_state);
 }
@@ -1701,6 +1712,8 @@ label_retry:
 
 	if (n_alloc > ncached)
 		n_alloc = ncached;
+
+	assert(tbin->ncached == 0);
 	/* tbin->avail[-ncached ... -1] are available items. */
 	memcpy(&tbin->avail[-(int)n_alloc], &cbin->avail[ncached - n_alloc],
 	    sizeof(void *) * n_alloc);
@@ -1720,6 +1733,7 @@ label_retry:
 		goto label_retry;
 	}
 	assert(tbin->avail[-(int)n_alloc] && tbin->avail[-1]);
+	tbin->ncached = n_alloc;
 
 	return n_alloc;
 }
@@ -1775,30 +1789,44 @@ arena_cache_alloc_large(tsdn_t *tsdn, arena_t *arena, szind_t binind,
 }
 
 /*
- * Fill tcache from acache if there is memory cached in acache. Otherwise, fill
- * from arena directly.
+ * Fill tcache from acache if there is memory cached in acache. Return number of
+ * items filled.
  */
-JEMALLOC_ALWAYS_INLINE void
+JEMALLOC_ALWAYS_INLINE size_t
 arena_cache_alloc_small(tsdn_t *tsdn, arena_t *arena, tcache_t *tcache,
     tcache_bin_t *tbin, szind_t binind)
 {
 	arena_cache_bin_t *cbin = &arena->acache->cbins[binind];
-	size_t allocated, nfill;
+	size_t nfill;
 
 	assert(binind < NBINS);
 	nfill = tcache_bin_info[binind].ncached_max >> tbin->lg_fill_div;
 	assert(nfill);
-	allocated = cbin_alloc_to_tbin(cbin, tbin, nfill);
-	if (allocated) {
-		tbin->ncached = allocated;
-		return;
+
+	if (binind < ACACHE_MIN_IND) {
+		size_t n_items_last_thd;
+		assert(cbin->n_items_last_thd <=
+		    arena_cache_bin_info[binind].ncached_max);
+
+		n_items_last_thd = ACCESS_ONCE(cbin->n_items_last_thd);
+		/*
+		 * Reusing small items (cacheline granularity) from acache may cause serious
+		 * fragmentation and false sharing. Only reuse when the current thread was
+		 * the one that deallocated the memory into acache.
+		 */
+		if (cbin->last_thd != tsdn || n_items_last_thd == 0) {
+			return 0;
+		}
+
+		/* There are race conditions around this, which could cause some inefficient
+		 * cache reuse. However it should be rare and still safe. */
+		if (n_items_last_thd < nfill) {
+			nfill = n_items_last_thd;
+		}
+		ACCESS_ONCE(cbin->n_items_last_thd) = n_items_last_thd - nfill;
 	}
 
-	/* fill through arena directly */
-	arena_tcache_fill_small(tsdn, arena, tbin, binind, config_prof ?
-	    tcache->prof_accumbytes : 0);
-	if (config_prof)
-		tcache->prof_accumbytes = 0;
+	return cbin_alloc_to_tbin(cbin, tbin, nfill);
 }
 
 JEMALLOC_ALWAYS_INLINE void
@@ -1877,13 +1905,6 @@ arena_cache_flush_small(tsdn_t *tsdn, arena_t *arena, arena_bin_t *bin,
 		/* Needed as acache is enabled / disabled. */
 		arena_bin_t *bin = &bin_arena->bins[binind];
 
-		if (config_prof && bin_arena == arena) {
-			/* 	if (arena_prof_accum(tsd_tsdn(tsd), arena, */
-			/* 	    tcache->prof_accumbytes)) */
-			/* 		prof_idump(tsd_tsdn(tsd)); */
-			/* 	tcache->prof_accumbytes = 0; */
-		}
-
 		malloc_mutex_lock(tsdn, &bin->lock);
 		if (config_stats && bin_arena == arena) {
 			arena_cache_stats_merge_locked(arena, bin, cbin, binind, nrequests,
@@ -1931,17 +1952,9 @@ arena_cache_flush_large(tsdn_t *tsdn, arena_t *arena, arena_bin_t *bin,
 		arena_t *bin_arena = extent_node_arena_get(&chunk->node);
 
 		malloc_mutex_lock(tsdn, &bin_arena->lock);
-
 		if (config_stats && bin_arena == arena) {
 			arena_cache_stats_merge_locked(arena, bin, cbin, binind, nrequests,
 			   true);
-		}
-		if ((config_prof || config_stats) && bin_arena == arena) {
-			/* 	if (config_prof) { */
-			/* 		idump = arena_prof_accum_locked(arena, */
-			/* 		    tcache->prof_accumbytes); */
-			/* 		tcache->prof_accumbytes = 0; */
-			/* 	} */
 		}
 
 		ndeferred = 0;
@@ -1964,8 +1977,6 @@ arena_cache_flush_large(tsdn_t *tsdn, arena_t *arena, arena_bin_t *bin,
 		}
 		malloc_mutex_unlock(tsdn, &bin_arena->lock);
 
-		/* if (config_prof && idump) */
-		/* 	prof_idump(tsd_tsdn(tsd)); */
 		arena_decay_ticks(tsdn, bin_arena, nflush - ndeferred);
 	}
 }
@@ -2024,54 +2035,47 @@ arena_cache_dalloc(tsdn_t *tsdn, arena_t *arena, void **items,
 		/* Queue the stats update as we are not going to lock the arena. */
 		arena_cache_merge_stats(arena, binind, nrequests);
 	} else {
-		size_t nkeep, nflush;
-
 		if (binind < ACACHE_MIN_IND) {
 			assert(!is_large);
-
-			/* Flush everything (not reusing them). Basically batching the flush. */
-			malloc_mutex_lock(tsdn, &bin->lock);
-			arena_cache_flush_small(tsdn, arena, bin, cbin, items, n_items, binind,
-			    nrequests);
 			arena_cache_flush_small(tsdn, arena, bin, cbin, cbin->avail, ncached,
-			    binind, 0);
-			malloc_mutex_unlock(tsdn, &bin->lock);
-			/* Simple unlock and return in this case. */
-			cbin_unlock(cbin, cbin_state_pack(state, 0, 0, false));
-
-			return;
-		}
-
-		if (n_items >= arena_cache_bin_info[binind].flush_remain) {
-			nkeep = 0;
+			    binind, nrequests);
+			state = cbin_state_pack(state, 0, 0, true);
+			ncached = low_water = 0;
+			cbin->last_thd = NULL;
 		} else {
-			nkeep = arena_cache_bin_info[binind].flush_remain - n_items;
-		}
-		/*
-		 * After flushing back to arena, and return the n_items to acache, we leave
-		 * flush_remain items in acache.
-		 */
-		nflush = ncached - nkeep;
-		assert(nkeep < ncached);
+			size_t nkeep, nflush;
 
-		/*
-		 * If we use cbin_alloc to get items from the cbin, it's possible to avoid
-		 * locking the cbin while flushing to arena. However it requires additional
-		 * memcpy in that case.
-		 */
-		arena_cache_flush(tsdn, arena, bin, cbin, &cbin->avail[nkeep],
-		    nflush, binind, nrequests, is_large);
+			if (n_items >= arena_cache_bin_info[binind].flush_remain) {
+				nkeep = 0;
+			} else {
+				nkeep = arena_cache_bin_info[binind].flush_remain - n_items;
+			}
+			/*
+			 * After flushing back to arena, and return the n_items to acache, we leave
+			 * flush_remain items in acache.
+			 */
+			nflush = ncached - nkeep;
+			assert(nkeep < ncached);
 
-		/* Update state which will be used for unlocking. */
-		ncached = nkeep;
-		if (low_water > nkeep + n_items) {
-			low_water = nkeep + n_items;
-			/* ncached will be adjusted when commiting */
-			state = cbin_state_pack(state, ncached, low_water, true);
-		} else {
-			state = cbin_state_adjust(state, -nflush, false);
+			/*
+			 * If we use cbin_alloc to get items from the cbin, it's possible to avoid
+			 * locking the cbin while flushing to arena. However it requires additional
+			 * memcpy in that case.
+			 */
+			arena_cache_flush(tsdn, arena, bin, cbin, &cbin->avail[nkeep],
+												nflush, binind, nrequests, is_large);
+
+			/* Update state which will be used for unlocking. */
+			ncached = nkeep;
+			if (low_water > nkeep + n_items) {
+				low_water = nkeep + n_items;
+				/* ncached will be adjusted when commiting */
+				state = cbin_state_pack(state, ncached, low_water, true);
+			} else {
+				state = cbin_state_adjust(state, -nflush, false);
+			}
+			/* Fall through to free to cbin and unlock. */
 		}
-		/* Fall through to free to cbin and unlock. */
 	}
 	assert(ncached + n_items <= arena_cache_bin_info[binind].ncached_max);
 
@@ -2084,6 +2088,17 @@ arena_cache_dalloc(tsdn_t *tsdn, arena_t *arena, void **items,
 	assert(cbin->avail[ncached + n_items - 1]);
 	assert((state & ACACHE_NCACHED_MASK) <=
 	    arena_cache_bin_info[binind].ncached_max);
+
+	if (binind < ACACHE_MIN_IND) {
+		if (cbin->last_thd == tsdn) {
+			cbin->n_items_last_thd += n_items;
+			assert(cbin->n_items_last_thd <=
+			    arena_cache_bin_info[binind].ncached_max);
+		} else {
+			cbin->last_thd = tsdn;
+			cbin->n_items_last_thd = n_items;
+		}
+	}
 
 	/* Release the bitlock, and adjust ncached. */
 	cbin_unlock(cbin, cbin_state_adjust(state, n_items, false));

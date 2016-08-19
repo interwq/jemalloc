@@ -2409,9 +2409,6 @@ arena_bin_malloc_hard(tsdn_t *tsdn, arena_t *arena, arena_bin_t *bin)
 	return (arena_run_reg_alloc(bin->runcur, bin_info));
 }
 
-// Disable as this doesn't seem to help. At least with the current refill policy.
-//#define ACACHE_FILL
-
 void
 arena_tcache_fill_small(tsdn_t *tsdn, arena_t *arena, tcache_bin_t *tbin,
     szind_t binind, uint64_t prof_accumbytes)
@@ -2459,45 +2456,6 @@ arena_tcache_fill_small(tsdn_t *tsdn, arena_t *arena, tcache_bin_t *tbin,
 		bin->stats.nfills++;
 		tbin->tstats.nrequests = 0;
 	}
-#ifdef ACACHE_FILL
-	{
-		acache_state_t state;
-		arena_cache_bin_t *cbin = &arena->acache->cbins[binind];
-		size_t ncached, low_water;
-		bool bin_locked;
-
-		state = cbin_state_get(cbin, &ncached, &low_water, &bin_locked);
-		if (!bin_locked && !ncached) {
-			if (!cbin_lock(cbin, &state)) {
-				unsigned j;
-				for (j = 0, nfill = (arena_cache_bin_info[binind].ncached_max >> 4);
-						 j < nfill; j++) {
-					arena_run_t *run;
-					void *ptr;
-					if ((run = bin->runcur) != NULL && run->nfree > 0)
-						ptr = arena_run_reg_alloc(run, &arena_bin_info[binind]);
-					else
-						ptr = arena_bin_malloc_hard(tsdn, arena, bin);
-					if (ptr == NULL) {
-						break;
-					}
-					if (config_fill && unlikely(opt_junk_alloc)) {
-						arena_alloc_junk_small(ptr, &arena_bin_info[binind],
-						    true);
-					}
-					/* Insert such that low regions get used first. */
-					cbin->avail[j] = ptr;
-				}
-				if (config_stats) {
-					bin->stats.nmalloc += j;
-					bin->stats.curregs += j;
-				}
-				/* Unlock the bin and update ncached. */
-				cbin_unlock(cbin, cbin_state_adjust(state, j, false));
-			}
-		}
-	}
-#endif
 	malloc_mutex_unlock(tsdn, &bin->lock);
 	tbin->ncached = i;
 	arena_decay_tick(tsdn, arena);
@@ -3616,9 +3574,11 @@ arena_new(tsdn_t *tsdn, unsigned ind)
 		return (NULL);
 
 	if (config_acache) {
+		/* Allocate and initilize arena cache. */
 		acache = arena->acache = (arena_cache_t *)((uintptr_t)arena +
 		    arena_stats_size);
 		for (i = 0; i < nhbins; i++) {
+			memset(&acache->cbins[i], 0, sizeof(arena_cache_bin_t));
 			acache->cbins[i].avail = (void **)((uintptr_t)arena +
 			    (uintptr_t)stack_offset);
 			stack_offset += arena_cache_bin_info[i].ncached_max * sizeof(void *);
