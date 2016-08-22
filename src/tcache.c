@@ -43,14 +43,11 @@ tcache_event_hard(tsd_t *tsd, tcache_t *tcache)
 		/*
 		 * Flush (ceiling) 3/4 of the objects below the low water mark.
 		 */
-		if (binind < NBINS) {
-			tcache_bin_flush_small(tsd, tcache, tbin, binind,
-			    tbin->ncached - tbin->low_water + (tbin->low_water
-			    >> 2));
-		} else {
-			tcache_bin_flush_large(tsd, tbin, binind, tbin->ncached
-			    - tbin->low_water + (tbin->low_water >> 2), tcache);
-		}
+		unsigned flush_rem = tbin->ncached - tbin->low_water
+		    + (tbin->low_water >> 2);
+		tcache_bin_flush(tsd, tcache, tbin, binind, flush_rem,
+		    binind < NBINS ? false : true);
+
 		/*
 		 * Reduce fill count by 2X.  Limit lg_fill_div such that the
 		 * fill count is always at least 1.
@@ -83,7 +80,7 @@ tcache_alloc_small_hard(tsdn_t *tsdn, arena_t *arena, tcache_t *tcache,
 	void *ret;
 
 	if (!config_acache ||
-			!arena_cache_alloc_small(tsdn, arena, tcache, tbin, binind)) {
+	    !arena_cache_alloc_small(tsdn, arena, tcache, tbin, binind)) {
 		/* Acache not available. Fill from arena directly. */
 		arena_tcache_fill_small(tsdn, arena, tbin, binind, config_prof ?
 		    tcache->prof_accumbytes : 0);
@@ -97,248 +94,30 @@ tcache_alloc_small_hard(tsdn_t *tsdn, arena_t *arena, tcache_t *tcache,
 }
 
 void
-tcache_bin_flush_small(tsd_t *tsd, tcache_t *tcache, tcache_bin_t *tbin,
-    szind_t binind, unsigned rem)
+tcache_bin_flush(tsd_t *tsd, tcache_t *tcache, tcache_bin_t *tbin,
+    szind_t binind, unsigned rem, const bool is_large)
 {
 	arena_t *arena;
-	UNUSED void *ptr;
-	UNUSED unsigned i, nflush, ndeferred;
-	UNUSED bool merged_stats = false;
+	unsigned nflush;
 
-	assert(binind < NBINS);
-	assert(rem <= tbin->ncached);
+	if (is_large)
+		assert(binind < nhbins);
+	else
+		assert(binind < NBINS);
+	assert(tbin->ncached && rem <= tbin->ncached);
 
 	arena = arena_choose(tsd, NULL);
 	assert(arena != NULL);
 
-#define ACACHE_ARENA__
-#ifdef ACACHE_ARENA__
 	nflush = tbin->ncached - rem;
-	if (nflush > 0) {
-		arena_cache_dalloc(tsd_tsdn(tsd), arena, tbin->avail - nflush, nflush, binind,
-		    tbin->tstats.nrequests, false);
-	}
+	arena_cache_dalloc(tsd_tsdn(tsd), arena, tbin->avail - nflush, nflush,
+	    binind, tbin->tstats.nrequests, is_large);
+
 	if (config_prof) {
-		if (arena_prof_accum(tsd_tsdn(tsd), arena,
-												 tcache->prof_accumbytes)) {
-				prof_idump(tsd_tsdn(tsd));
-		}
-		tcache->prof_accumbytes = 0;
-	}
-
-#else
-	for (nflush = tbin->ncached - rem; nflush > 0; nflush = ndeferred) {
-		/* Process the arena bin associated with the first object. */
-		arena_chunk_t *chunk = (arena_chunk_t *)CHUNK_ADDR2BASE(
-		    *(tbin->avail - 1));
-		arena_t *bin_arena = extent_node_arena_get(&chunk->node);
-		/* Needed as acache is enabled / disabled. */
-		UNUSED arena_bin_t *bin = &bin_arena->bins[binind];
-		UNUSED size_t n_items = 0;
-		UNUSED void *items_flush[nflush];
-
-		if (config_prof && bin_arena == arena) {
-			if (arena_prof_accum(tsd_tsdn(tsd), arena,
-			    tcache->prof_accumbytes))
-				prof_idump(tsd_tsdn(tsd));
-			tcache->prof_accumbytes = 0;
-		}
-
-		if (config_acache) {
-			if (config_stats && bin_arena == arena) {
-				assert(!merged_stats);
-				merged_stats = true;
-			}
-		} else {
-			malloc_mutex_lock(tsd_tsdn(tsd), &bin->lock);
-			if (config_stats && bin_arena == arena) {
-				assert(!merged_stats);
-				merged_stats = true;
-				bin->stats.nflushes++;
-				bin->stats.nrequests += tbin->tstats.nrequests;
-				tbin->tstats.nrequests = 0;
-			}
-		}
-
-		ndeferred = 0;
-		for (i = 0; i < nflush; i++) {
-			ptr = *(tbin->avail - 1 - i);
-			assert(ptr != NULL);
-			chunk = (arena_chunk_t *)CHUNK_ADDR2BASE(ptr);
-			if (extent_node_arena_get(&chunk->node) == bin_arena) {
-				if (config_acache) {
-					items_flush[n_items++] = ptr;
-				} else {
-					size_t pageind = ((uintptr_t)ptr -
-					    (uintptr_t)chunk) >> LG_PAGE;
-					arena_chunk_map_bits_t *bitselm =
-					    arena_bitselm_get_mutable(chunk, pageind);
-					arena_dalloc_bin_junked_locked(tsd_tsdn(tsd),
-					    bin_arena, chunk, ptr, bitselm);
-				}
-			} else {
-				/*
-				 * This object was allocated via a different
-				 * arena bin than the one that is currently
-				 * locked.  Stash the object, so that it can be
-				 * handled in a future pass.
-				 */
-				*(tbin->avail - 1 - ndeferred) = ptr;
-				ndeferred++;
-			}
-		}
-		if (config_acache) {
-			arena_cache_dalloc(tsd_tsdn(tsd), bin_arena, items_flush, n_items, binind,
-			    bin_arena == arena ? tbin->tstats.nrequests : 0, false);
-		} else {
-			malloc_mutex_unlock(tsd_tsdn(tsd), &bin->lock);
-		}
-		arena_decay_ticks(tsd_tsdn(tsd), bin_arena, nflush - ndeferred);
-	}
-	if (config_stats && !merged_stats) {
-		/*
-		 * The flush loop didn't happen to flush to this thread's
-		 * arena, so the stats didn't get merged.  Manually do so now.
-		 */
-		if (config_acache) {
-			arena_cache_merge_stats(arena, binind, tbin->tstats.nrequests);
-		} else {
-			arena_bin_t *bin = &arena->bins[binind];
-			malloc_mutex_lock(tsd_tsdn(tsd), &bin->lock);
-			bin->stats.nflushes++;
-			bin->stats.nrequests += tbin->tstats.nrequests;
-			malloc_mutex_unlock(tsd_tsdn(tsd), &bin->lock);
-		}
-	}
-#endif
-	tbin->tstats.nrequests = 0;
-
-	memmove(tbin->avail - rem, tbin->avail - tbin->ncached, rem *
-	    sizeof(void *));
-	tbin->ncached = rem;
-	if ((int)tbin->ncached < tbin->low_water)
-		tbin->low_water = tbin->ncached;
-}
-
-void
-tcache_bin_flush_large(tsd_t *tsd, tcache_bin_t *tbin, szind_t binind,
-    unsigned rem, tcache_t *tcache)
-{
-	arena_t *arena;
-	UNUSED void *ptr;
-	UNUSED unsigned i, nflush, ndeferred;
-	UNUSED bool merged_stats = false;
-
-	assert(binind < nhbins);
-	assert(rem <= tbin->ncached);
-
-	arena = arena_choose(tsd, NULL);
-	assert(arena != NULL);
-
-#define ACACHE_ARENA__
-#ifdef ACACHE_ARENA__
-	nflush = tbin->ncached - rem;
-	if (nflush > 0) {
-		arena_cache_dalloc(tsd_tsdn(tsd), arena, tbin->avail - nflush, nflush, binind,
-	      tbin->tstats.nrequests, true);
-	}
-	if (config_prof) {
-		if (arena_prof_accum(tsd_tsdn(tsd), arena,
-												 tcache->prof_accumbytes)) {
-				prof_idump(tsd_tsdn(tsd));
-		}
-		tcache->prof_accumbytes = 0;
-	}
-
-#else
-	for (nflush = tbin->ncached - rem; nflush > 0; nflush = ndeferred) {
-		/* Process the arena associated with the first object. */
-		arena_chunk_t *chunk = (arena_chunk_t *)CHUNK_ADDR2BASE(
-		    *(tbin->avail - 1));
-		arena_t *bin_arena = extent_node_arena_get(&chunk->node);
-		/* Needed as acache is enabled / disabled. */
-		UNUSED bool idump;
-		UNUSED void *items_flush[nflush];
-		UNUSED size_t n_items = 0;
-
-		if (config_prof)
-			idump = false;
-		if (config_acache) {
-			if ((config_prof || config_stats) && bin_arena == arena) {
-				if (config_prof) {
-					idump = arena_prof_accum(tsd_tsdn(tsd), arena,
-					    tcache->prof_accumbytes);
-					tcache->prof_accumbytes = 0;
-				}
-				if (config_stats) {
-					merged_stats = true;
-				}
-			}
-		} else {
-			malloc_mutex_lock(tsd_tsdn(tsd), &bin_arena->lock);
-			if ((config_prof || config_stats) && bin_arena == arena) {
-				if (config_prof) {
-					idump = arena_prof_accum_locked(arena,
-					    tcache->prof_accumbytes);
-					tcache->prof_accumbytes = 0;
-				}
-				if (config_stats) {
-					merged_stats = true;
-					arena->stats.nrequests_large += tbin->tstats.nrequests;
-					arena->stats.lstats[binind - NBINS].nrequests +=
-				      tbin->tstats.nrequests;
-					tbin->tstats.nrequests = 0;
-				}
-			}
-		}
-		ndeferred = 0;
-		for (i = 0; i < nflush; i++) {
-			ptr = *(tbin->avail - 1 - i);
-			assert(ptr != NULL);
-			chunk = (arena_chunk_t *)CHUNK_ADDR2BASE(ptr);
-			if (extent_node_arena_get(&chunk->node) == bin_arena) {
-				if (config_acache)
-					items_flush[n_items++] = ptr;
-				else
-					arena_dalloc_large_junked_locked(tsd_tsdn(tsd),
-				      bin_arena, chunk, ptr);
-			} else {
-				/*
-				 * This object was allocated via a different
-				 * arena than the one that is currently locked.
-				 * Stash the object, so that it can be handled
-				 * in a future pass.
-				 */
-				*(tbin->avail - 1 - ndeferred) = ptr;
-				ndeferred++;
-			}
-		}
-		if (config_acache)
-			arena_cache_dalloc(tsd_tsdn(tsd), bin_arena, items_flush, n_items,
-			    binind, bin_arena == arena ? tbin->tstats.nrequests : 0, true);
-		else
-			malloc_mutex_unlock(tsd_tsdn(tsd), &bin_arena->lock);
-
-		if (config_prof && idump)
+		if (arena_prof_accum(tsd_tsdn(tsd), arena, tcache->prof_accumbytes))
 			prof_idump(tsd_tsdn(tsd));
-		arena_decay_ticks(tsd_tsdn(tsd), bin_arena, nflush - ndeferred);
+		tcache->prof_accumbytes = 0;
 	}
-	if (config_stats && !merged_stats) {
-		/*
-		 * The flush loop didn't happen to flush to this thread's
-		 * arena, so the stats didn't get merged.  Manually do so now.
-		 */
-		if (config_acache) {
-			arena_cache_merge_stats(arena, binind, tbin->tstats.nrequests);
-		} else {
-			malloc_mutex_lock(tsd_tsdn(tsd), &arena->lock);
-			arena->stats.nrequests_large += tbin->tstats.nrequests;
-			arena->stats.lstats[binind - NBINS].nrequests +=
-			    tbin->tstats.nrequests;
-			malloc_mutex_unlock(tsd_tsdn(tsd), &arena->lock);
-		}
-	}
-#endif
 	tbin->tstats.nrequests = 0;
 
 	memmove(tbin->avail - rem, tbin->avail - tbin->ncached, rem *
@@ -461,7 +240,9 @@ tcache_destroy(tsd_t *tsd, tcache_t *tcache)
 
 	for (i = 0; i < NBINS; i++) {
 		tcache_bin_t *tbin = &tcache->tbins[i];
-		tcache_bin_flush_small(tsd, tcache, tbin, i, 0);
+
+		if (tbin->ncached)
+			tcache_bin_flush(tsd, tcache, tbin, i, 0, false);
 
 		if (config_stats && tbin->tstats.nrequests != 0) {
 			arena_bin_t *bin = &arena->bins[i];
@@ -473,7 +254,9 @@ tcache_destroy(tsd_t *tsd, tcache_t *tcache)
 
 	for (; i < nhbins; i++) {
 		tcache_bin_t *tbin = &tcache->tbins[i];
-		tcache_bin_flush_large(tsd, tbin, i, 0, tcache);
+
+		if (tbin->ncached)
+			tcache_bin_flush(tsd, tcache, tbin, i, 0, true);
 
 		if (config_stats && tbin->tstats.nrequests != 0) {
 			malloc_mutex_lock(tsd_tsdn(tsd), &arena->lock);

@@ -1987,29 +1987,15 @@ arena_cache_flush(tsdn_t *tsdn, arena_t *arena, arena_bin_t *bin,
 		uint64_t nrequests, const bool is_large)
 {
 
-	if (is_large) {
-		arena_cache_flush_large(tsdn, arena, bin, cbin, items, n_items, binind,
-	    nrequests);
-	} else {
+	if (!is_large) {
+		assert(binind < NBINS);
 		arena_cache_flush_small(tsdn, arena, bin, cbin, items, n_items, binind,
 	    nrequests);
+	} else {
+		assert(binind >= NBINS);
+		arena_cache_flush_large(tsdn, arena, bin, cbin, items, n_items, binind,
+	    nrequests);
 	}
-
-	/* if (is_large) { */
-	/* 	assert(binind >= NBINS); */
-	/* 	malloc_mutex_lock(tsdn, &arena->lock); */
-	/* } else { */
-	/* 	assert(binind < NBINS); */
-	/* 	malloc_mutex_lock(tsdn, &bin->lock); */
-	/* } */
-
-	/* arena_cache_flush_locked(tsdn, arena, bin, cbin, items, n_items, binind, */
-	/*     nrequests, is_large); */
-
-	/* if (is_large) */
-	/* 	malloc_mutex_unlock(tsdn, &arena->lock); */
-	/* else */
-	/* 	malloc_mutex_unlock(tsdn, &bin->lock); */
 }
 
 
@@ -2063,7 +2049,7 @@ arena_cache_dalloc(tsdn_t *tsdn, arena_t *arena, void **items,
 			 * memcpy in that case.
 			 */
 			arena_cache_flush(tsdn, arena, bin, cbin, &cbin->avail[nkeep],
-												nflush, binind, nrequests, is_large);
+			    nflush, binind, nrequests, is_large);
 
 			/* Update state which will be used for unlocking. */
 			ncached = nkeep;

@@ -134,10 +134,8 @@ size_t	tcache_salloc(tsdn_t *tsdn, const void *ptr);
 void	tcache_event_hard(tsd_t *tsd, tcache_t *tcache);
 void	*tcache_alloc_small_hard(tsdn_t *tsdn, arena_t *arena, tcache_t *tcache,
     tcache_bin_t *tbin, szind_t binind, bool *tcache_success);
-void	tcache_bin_flush_small(tsd_t *tsd, tcache_t *tcache, tcache_bin_t *tbin,
-    szind_t binind, unsigned rem);
-void	tcache_bin_flush_large(tsd_t *tsd, tcache_bin_t *tbin, szind_t binind,
-    unsigned rem, tcache_t *tcache);
+void	tcache_bin_flush(tsd_t *tsd, tcache_t *tcache, tcache_bin_t *tbin,
+    szind_t binind, unsigned rem, bool is_large);
 void	tcache_arena_reassociate(tsdn_t *tsdn, tcache_t *tcache,
     arena_t *oldarena, arena_t *newarena);
 tcache_t *tcache_get_hard(tsd_t *tsd);
@@ -418,8 +416,8 @@ tcache_dalloc_small(tsd_t *tsd, tcache_t *tcache, void *ptr, szind_t binind,
 	tbin = &tcache->tbins[binind];
 	tbin_info = &tcache_bin_info[binind];
 	if (unlikely(tbin->ncached == tbin_info->ncached_max)) {
-		tcache_bin_flush_small(tsd, tcache, tbin, binind,
-		    (tbin_info->ncached_max >> 1));
+		tcache_bin_flush(tsd, tcache, tbin, binind,
+		    (tbin_info->ncached_max >> 1), false);
 	}
 	assert(tbin->ncached < tbin_info->ncached_max);
 	tbin->ncached++;
@@ -448,8 +446,8 @@ tcache_dalloc_large(tsd_t *tsd, tcache_t *tcache, void *ptr, size_t size,
 	tbin = &tcache->tbins[binind];
 	tbin_info = &tcache_bin_info[binind];
 	if (unlikely(tbin->ncached == tbin_info->ncached_max)) {
-		tcache_bin_flush_large(tsd, tbin, binind,
-		    (tbin_info->ncached_max >> 1), tcache);
+		tcache_bin_flush(tsd, tcache, tbin, binind,
+		    (tbin_info->ncached_max >> 1), true);
 	}
 	assert(tbin->ncached < tbin_info->ncached_max);
 	tbin->ncached++;

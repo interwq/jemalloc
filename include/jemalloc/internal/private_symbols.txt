@@ -497,8 +497,7 @@ tcache_alloc_large
 tcache_alloc_small
 tcache_alloc_small_hard
 tcache_arena_reassociate
-tcache_bin_flush_large
-tcache_bin_flush_small
+tcache_bin_flush
 tcache_bin_info
 tcache_boot
 tcache_cleanup
