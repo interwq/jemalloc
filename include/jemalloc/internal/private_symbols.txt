@@ -366,6 +366,9 @@ nstime_sec
 nstime_subtract
 nstime_update
 opt_abort
+opt_acache
+opt_acache_size_ratio
+opt_acache_bypass
 opt_decay_time
 opt_dss
 opt_junk

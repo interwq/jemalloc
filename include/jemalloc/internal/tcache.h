@@ -353,7 +353,7 @@ tcache_alloc_large(tsd_t *tsd, arena_t *arena, tcache_t *tcache, size_t size,
 		arena = arena_choose(tsd, arena);
 		if (unlikely(arena == NULL))
 			return (NULL);
-		if (config_acache && !slow_path) {
+		if (config_acache && !slow_path && opt_acache) {
 			ret = arena_cache_alloc_large(tsd_tsdn(tsd), arena, binind,
 			    s2u(size), zero);
 		} else {

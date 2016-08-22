@@ -89,6 +89,8 @@ CTL_PROTO(config_utrace)
 CTL_PROTO(config_valgrind)
 CTL_PROTO(config_xmalloc)
 CTL_PROTO(opt_abort)
+CTL_PROTO(opt_acache)
+CTL_PROTO(opt_acache_size_ratio)
 CTL_PROTO(opt_dss)
 CTL_PROTO(opt_lg_chunk)
 CTL_PROTO(opt_narenas)
@@ -266,6 +268,8 @@ static const ctl_named_node_t	config_node[] = {
 
 static const ctl_named_node_t opt_node[] = {
 	{NAME("abort"),		CTL(opt_abort)},
+	{NAME("acache"),	CTL(opt_acache)},
+	{NAME("acache_size_ratio"),	CTL(opt_acache_size_ratio)},
 	{NAME("dss"),		CTL(opt_dss)},
 	{NAME("lg_chunk"),	CTL(opt_lg_chunk)},
 	{NAME("narenas"),	CTL(opt_narenas)},
@@ -1291,6 +1295,8 @@ CTL_RO_NL_CGEN(config_utrace, opt_utrace, opt_utrace, bool)
 CTL_RO_NL_CGEN(config_xmalloc, opt_xmalloc, opt_xmalloc, bool)
 CTL_RO_NL_CGEN(config_tcache, opt_tcache, opt_tcache, bool)
 CTL_RO_NL_CGEN(config_tcache, opt_lg_tcache_max, opt_lg_tcache_max, ssize_t)
+CTL_RO_NL_CGEN(config_acache, opt_acache, opt_acache, bool)
+CTL_RO_NL_CGEN(config_acache, opt_acache_size_ratio, opt_acache_size_ratio, unsigned)
 CTL_RO_NL_CGEN(config_prof, opt_prof, opt_prof, bool)
 CTL_RO_NL_CGEN(config_prof, opt_prof_prefix, opt_prof_prefix, const char *)
 CTL_RO_NL_CGEN(config_prof, opt_prof_active, opt_prof_active, bool)

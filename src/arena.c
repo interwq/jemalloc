@@ -4,6 +4,12 @@
 /******************************************************************************/
 /* Data. */
 
+bool	opt_acache = false;
+/* Size of acache, relative to tcache. */
+unsigned opt_acache_size_ratio = ACACHE_SIZE_RATIO_DEFAULT;
+/* Bypass acache for small items to avoid fragmentation. */
+unsigned opt_acache_bypass = ACACHE_BYPASS_IND_DEFAULT;
+
 purge_mode_t	opt_purge = PURGE_DEFAULT;
 const char	*purge_mode_names[] = {
 	"ratio",
@@ -3537,8 +3543,8 @@ arena_new(tsdn_t *tsdn, unsigned ind)
 	arena_t *arena;
 	size_t arena_size, arena_stats_size, all_size;
 	unsigned i, stack_offset;
+	bool acache_enabled;
 
-	unsigned sum = 0;
 	/* Compute arena size to incorporate sufficient runs_avail elements. */
 	arena_size = offsetof(arena_t, runs_avail) + (sizeof(arena_run_heap_t) *
 	    runs_avail_nclasses);
@@ -3553,15 +3559,17 @@ arena_new(tsdn_t *tsdn, unsigned ind)
 	} else
 		arena_stats_size = arena_size;
 
-	if (config_acache) {
+	acache_enabled = config_acache && opt_acache;
+	if (acache_enabled) {
 		all_size = arena_stats_size + offsetof(arena_cache_t, cbins) +
 			sizeof(arena_cache_bin_t) * nhbins;
 		/* Naturally align the pointer stacks. */
 		all_size = PTR_CEILING(all_size);
 		stack_offset = all_size;
-		all_size += ACACHE_TCACHE_RATIO * tcache_stack_nelms * sizeof(void *);
-	} else
+		all_size += opt_acache_size_ratio * tcache_stack_nelms * sizeof(void *);
+	} else {
 		all_size = arena_stats_size;
+	}
 
 	/*
 	 * Avoid false cacheline sharing. A padded cacheline to avoid interference
@@ -3573,7 +3581,7 @@ arena_new(tsdn_t *tsdn, unsigned ind)
 	if (arena == NULL)
 		return (NULL);
 
-	if (config_acache) {
+	if (acache_enabled) {
 		/* Allocate and initilize arena cache. */
 		acache = arena->acache = (arena_cache_t *)((uintptr_t)arena +
 		    arena_stats_size);
@@ -3582,7 +3590,6 @@ arena_new(tsdn_t *tsdn, unsigned ind)
 			acache->cbins[i].avail = (void **)((uintptr_t)arena +
 			    (uintptr_t)stack_offset);
 			stack_offset += arena_cache_bin_info[i].ncached_max * sizeof(void *);
-			sum += arena_cache_bin_info[i].ncached_max;
 			assert((uintptr_t)(acache->cbins[i].avail) <=
 			    ((uintptr_t)arena + all_size));
 		}

@@ -68,7 +68,7 @@ tcache_event_hard(tsd_t *tsd, tcache_t *tcache)
 	if (tcache->next_gc_bin == nhbins)
 		tcache->next_gc_bin = 0;
 
-	if (config_acache) {
+	if (config_acache && opt_acache) {
 		arena_cache_gc(tsd_tsdn(tsd), arena_choose(tsd, NULL));
 	}
 }
@@ -79,7 +79,7 @@ tcache_alloc_small_hard(tsdn_t *tsdn, arena_t *arena, tcache_t *tcache,
 {
 	void *ret;
 
-	if (!config_acache ||
+	if (!config_acache || !opt_acache ||
 	    !arena_cache_alloc_small(tsdn, arena, tcache, tbin, binind)) {
 		/* Acache not available. Fill from arena directly. */
 		arena_tcache_fill_small(tsdn, arena, tbin, binind, config_prof ?
@@ -433,7 +433,7 @@ tcache_boot(tsdn_t *tsdn)
 		tcache_stack_nelms += tcache_bin_info[i].ncached_max;
 	}
 	for (i = 0; i < nhbins; i++) {
-		unsigned acache_max = ACACHE_TCACHE_RATIO * tcache_bin_info[i].ncached_max;
+		unsigned acache_max = opt_acache_size_ratio * tcache_bin_info[i].ncached_max;
 		arena_cache_bin_info[i].ncached_max = acache_max;
 		arena_cache_bin_info[i].flush_remain = acache_max - (acache_max >> 2);
 	}

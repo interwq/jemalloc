@@ -1200,6 +1200,26 @@ malloc_conf_init(void)
 				    "lg_tcache_max", -1,
 				    (sizeof(size_t) << 3) - 1)
 			}
+
+			if (config_acache) {
+				CONF_HANDLE_BOOL(opt_acache, "acache", config_tcache)
+				if (CONF_MATCH("acache")) {
+					assert(!config_tcache);
+					if (opt_acache) {
+						opt_acache = false;
+						malloc_conf_error(
+						"acache cannot be enabled"
+						"without tcache",
+						k, klen, v, vlen);
+					}
+					continue;
+				}
+				CONF_HANDLE_UNSIGNED(opt_acache_size_ratio,
+				    "acache_size_ratio", 1, (1 << 16), false);
+				CONF_HANDLE_UNSIGNED(opt_acache_bypass,
+				    "acache_bypass", 0, NBINS, false);
+			}
+
 			if (config_prof) {
 				CONF_HANDLE_BOOL(opt_prof, "prof", true)
 				CONF_HANDLE_CHAR_P(opt_prof_prefix,

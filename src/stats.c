@@ -521,6 +521,8 @@ stats_print(void (*write_cb)(void *, const char *), void *cbopaque,
 		OPT_WRITE_BOOL(xmalloc)
 		OPT_WRITE_BOOL(tcache)
 		OPT_WRITE_SSIZE_T(lg_tcache_max)
+		OPT_WRITE_BOOL(acache)
+		OPT_WRITE_UNSIGNED(acache_size_ratio)
 		OPT_WRITE_BOOL(prof)
 		OPT_WRITE_CHAR_P(prof_prefix)
 		OPT_WRITE_BOOL_MUTABLE(prof_active, prof.active)

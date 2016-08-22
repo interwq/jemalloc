@@ -295,9 +295,9 @@ struct arena_bin_s {
 #define ACACHE_LOCKBIT   ((uint64_t)1 << 31)
 #define ACACHE_NCACHED_BITS 15
 #define ACACHE_NCACHED_MASK (((uint64_t)1 << ACACHE_NCACHED_BITS) - 1)
-/* Currently fixed size. */
-#define ACACHE_TCACHE_RATIO 4
-#define ACACHE_MIN_IND 16
+
+#define ACACHE_SIZE_RATIO_DEFAULT 4 /* default acache size = (4 * tcache) */
+#define ACACHE_BYPASS_IND_DEFAULT 16
 
 struct arena_cache_bin_info_s {
 	unsigned	ncached_max;	/* Upper limit on ncached. */
@@ -307,7 +307,7 @@ struct arena_cache_bin_info_s {
 struct arena_cache_bin_s {
 	/*
 	 * +--------     Layout for data (64 bits)     --------+
-	 * | 63...32 |  31  |   30   |  29......15 |  14.....0 |
+	 * | 63...32 |  31  |   30   | 29.......15 | 14......0 |
 	 * | [epoch] | lock | unused | [low_water] | [ncached] |
 	 * +---------------------------------------------------+
 	 * The single bit lock is used for cache_free.
@@ -320,8 +320,8 @@ struct arena_cache_bin_s {
 	uint64_t		queued_nrequests;
 
 	/*
-	 * For small items (ind < ACACHE_MIN_IND), we maintain the following info and
-	 * only reuse those memory if it's freed by the same thread.
+	 * For small items in acache, we maintain the following info and only reuse
+	 * these memory if it's freed by the same thread.
 	 */
 	tsdn_t			*last_thd; 				/* Most recent thread dalloced to acache */
 	uint64_t		n_items_last_thd;	/* # of items freed by last_thd */
@@ -549,6 +549,10 @@ static const size_t	large_pad =
     0
 #endif
     ;
+
+extern bool	opt_acache;
+extern unsigned opt_acache_size_ratio;
+extern unsigned opt_acache_bypass;
 
 extern purge_mode_t	opt_purge;
 extern const char	*purge_mode_names[];
@@ -1803,7 +1807,7 @@ arena_cache_alloc_small(tsdn_t *tsdn, arena_t *arena, tcache_t *tcache,
 	nfill = tcache_bin_info[binind].ncached_max >> tbin->lg_fill_div;
 	assert(nfill);
 
-	if (binind < ACACHE_MIN_IND) {
+	if (binind < opt_acache_bypass) {
 		size_t n_items_last_thd;
 		assert(cbin->n_items_last_thd <=
 		    arena_cache_bin_info[binind].ncached_max);
@@ -1844,8 +1848,13 @@ arena_cache_stats_merge_locked(arena_t *arena, arena_bin_t *bin,
 		arena_cache_bin_t *cbin, szind_t binind, uint64_t nrequests,
 		const bool is_large)
 {
+	uint64_t queued_nrequests;
+
+	if (!config_acache || !opt_acache)
+		return;
+
 	/* Called w/ arena or bin lock. Thus read + atomic_sub is safe. */
-	uint64_t queued_nrequests = ACCESS_ONCE(cbin->queued_nrequests);
+	queued_nrequests = ACCESS_ONCE(cbin->queued_nrequests);
 
 	if (nrequests || queued_nrequests) {
 		atomic_sub_uint64(&cbin->queued_nrequests, queued_nrequests);
@@ -2008,8 +2017,9 @@ arena_cache_dalloc(tsdn_t *tsdn, arena_t *arena, void **items,
 	acache_state_t state;
 	size_t ncached, low_water;
 
-	if (cbin_lock_and_get_info(cbin, &state, &ncached, &low_water)) {
-		/* Flush back to arena if acache is locked. */
+	if (!config_acache || !opt_acache ||
+	    cbin_lock_and_get_info(cbin, &state, &ncached, &low_water)) {
+		/* Flush back to arena if acache is not available. */
 		arena_cache_flush(tsdn, arena, bin, cbin, items, n_items, binind,
 		    nrequests, is_large);
 		return;
@@ -2021,7 +2031,7 @@ arena_cache_dalloc(tsdn_t *tsdn, arena_t *arena, void **items,
 		/* Queue the stats update as we are not going to lock the arena. */
 		arena_cache_merge_stats(arena, binind, nrequests);
 	} else {
-		if (binind < ACACHE_MIN_IND) {
+		if (binind < opt_acache_bypass) {
 			assert(!is_large);
 			arena_cache_flush_small(tsdn, arena, bin, cbin, cbin->avail, ncached,
 			    binind, nrequests);
@@ -2075,7 +2085,7 @@ arena_cache_dalloc(tsdn_t *tsdn, arena_t *arena, void **items,
 	assert((state & ACACHE_NCACHED_MASK) <=
 	    arena_cache_bin_info[binind].ncached_max);
 
-	if (binind < ACACHE_MIN_IND) {
+	if (binind < opt_acache_bypass) {
 		if (cbin->last_thd == tsdn) {
 			cbin->n_items_last_thd += n_items;
 			assert(cbin->n_items_last_thd <=
