@@ -339,6 +339,12 @@ struct arena_cache_s {
 struct arena_s {
 	/* This arena's index within the arenas array. */
 	unsigned		ind;
+	/*
+	 * When perCPU arena is enabled, to amortize the cost of reading / updating
+	 * the current CPU id, track the most recent thread accesing this arena, and
+	 * only read CPU if there is a mismatch.
+	 */
+	tsdn_t		*last_thd;
 
 	/*
 	 * Number of threads currently assigned to this arena, synchronized via
@@ -554,6 +560,9 @@ extern bool	opt_acache;
 extern unsigned opt_acache_size_ratio;
 extern unsigned opt_acache_bypass;
 
+extern unsigned opt_perCPU_arena;
+extern bool	opt_arena_purging_thread;
+
 extern purge_mode_t	opt_purge;
 extern const char	*purge_mode_names[];
 extern ssize_t		opt_lg_dirty_mult;
@@ -670,6 +679,8 @@ void	arena_prefork2(tsdn_t *tsdn, arena_t *arena);
 void	arena_prefork3(tsdn_t *tsdn, arena_t *arena);
 void	arena_postfork_parent(tsdn_t *tsdn, arena_t *arena);
 void	arena_postfork_child(tsdn_t *tsdn, arena_t *arena);
+bool	arena_purge_thread_init(unsigned ind);
+
 
 #endif /* JEMALLOC_H_EXTERNS */
 /******************************************************************************/
@@ -1394,6 +1405,9 @@ arena_decay_ticks(tsdn_t *tsdn, arena_t *arena, unsigned nticks)
 JEMALLOC_ALWAYS_INLINE void
 arena_decay_tick(tsdn_t *tsdn, arena_t *arena)
 {
+
+	if (opt_arena_purging_thread)
+		return;
 
 	arena_decay_ticks(tsdn, arena, 1);
 }

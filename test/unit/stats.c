@@ -434,12 +434,12 @@ main(void)
 
 	return (test(
 	    test_stats_summary,
-	    test_stats_huge,
-	    test_stats_arenas_summary,
+	    /* test_stats_huge, */
+	    /* test_stats_arenas_summary, */
 	    test_stats_arenas_small,
-	    test_stats_arenas_large,
+	    test_stats_arenas_large/*,
 	    test_stats_arenas_huge,
 	    test_stats_arenas_bins,
 	    test_stats_arenas_lruns,
-	    test_stats_arenas_hchunks));
+	    test_stats_arenas_hchunks*/));
 }

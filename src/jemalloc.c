@@ -57,7 +57,8 @@ static malloc_mutex_t	arenas_lock;
  * arenas.  arenas[narenas_auto..narenas_total) are only used if the application
  * takes some action to create them and allocate from them.
  */
-arena_t			**arenas;
+JEMALLOC_ALIGNED(CACHELINE)
+arena_t			*arenas[MALLOCX_ARENA_MAX];
 static unsigned		narenas_total; /* Use narenas_total_*(). */
 static arena_t		*a0; /* arenas[0]; read-only after initialization. */
 unsigned		narenas_auto; /* Read-only after initialization. */
@@ -413,11 +414,11 @@ narenas_total_get(void)
 
 /* Create a new arena and insert it into the arenas array at index ind. */
 static arena_t *
-arena_init_locked(tsdn_t *tsdn, unsigned ind)
+arena_init_locked(tsdn_t *tsdn, unsigned ind, bool *is_new_arena)
 {
 	arena_t *arena;
+	*is_new_arena = false;
 
-	assert(ind <= narenas_total_get());
 	if (ind > MALLOCX_ARENA_MAX)
 		return (NULL);
 	if (ind == narenas_total_get())
@@ -433,6 +434,7 @@ arena_init_locked(tsdn_t *tsdn, unsigned ind)
 		return (arena);
 	}
 
+	*is_new_arena = true;
 	/* Actually initialize the arena. */
 	arena = arena_new(tsdn, ind);
 	arena_set(ind, arena);
@@ -442,11 +444,18 @@ arena_init_locked(tsdn_t *tsdn, unsigned ind)
 arena_t *
 arena_init(tsdn_t *tsdn, unsigned ind)
 {
+	bool is_new_arena;
 	arena_t *arena;
 
 	malloc_mutex_lock(tsdn, &arenas_lock);
-	arena = arena_init_locked(tsdn, ind);
+	arena = arena_init_locked(tsdn, ind, &is_new_arena);
 	malloc_mutex_unlock(tsdn, &arenas_lock);
+
+	/* Cannot create new threads during init as it depends on malloc. */
+	if (opt_arena_purging_thread && is_new_arena && ind != 0) {
+		arena_purge_thread_init(ind);
+	}
+
 	return (arena);
 }
 
@@ -573,8 +582,25 @@ arena_choose_hard(tsd_t *tsd, bool internal)
 {
 	arena_t *ret JEMALLOC_CC_SILENCE_INIT(NULL);
 
+	if (opt_perCPU_arena) {
+		unsigned choose = malloc_getcpu();
+		ret = arena_get(tsd_tsdn(tsd), choose, true);
+		assert(ret);
+		/*
+		 * arena_get may create new arena and possibly new purge threads, which
+		 * leads to recursive malloc calls.
+		 */
+		if (!tsd_arena_get(tsd)) {
+			arena_bind(tsd, ret->ind, false);
+			arena_bind(tsd, ret->ind, true);
+		}
+
+		return tsd_arena_get(tsd);
+	}
+
 	if (narenas_auto > 1) {
 		unsigned i, j, choose[2], first_null;
+		bool is_new_arena[2] = {false};
 
 		/*
 		 * Determine binding for both non-internal and internal
@@ -636,7 +662,7 @@ arena_choose_hard(tsd_t *tsd, bool internal)
 				/* Initialize a new arena. */
 				choose[j] = first_null;
 				arena = arena_init_locked(tsd_tsdn(tsd),
-				    choose[j]);
+				    choose[j], &is_new_arena[j]);
 				if (arena == NULL) {
 					malloc_mutex_unlock(tsd_tsdn(tsd),
 					    &arenas_lock);
@@ -648,6 +674,15 @@ arena_choose_hard(tsd_t *tsd, bool internal)
 			arena_bind(tsd, choose[j], !!j);
 		}
 		malloc_mutex_unlock(tsd_tsdn(tsd), &arenas_lock);
+
+		/* After unlock, init purge threads if we created any new arenas. */
+		if (opt_arena_purging_thread) {
+			for (j = 0; j < 2; j++) {
+				if (is_new_arena[j]) {
+					arena_purge_thread_init(choose[j]);
+				}
+			}
+		}
 	} else {
 		ret = arena_get(tsd_tsdn(tsd), 0, false);
 		arena_bind(tsd, 0, false);
@@ -1220,6 +1255,9 @@ malloc_conf_init(void)
 				    "acache_bypass", 0, NBINS, false);
 			}
 
+			CONF_HANDLE_BOOL(opt_perCPU_arena, "percpu_arena", true);
+			CONF_HANDLE_BOOL(opt_arena_purging_thread, "purge_thread", true);
+
 			if (config_prof) {
 				CONF_HANDLE_BOOL(opt_prof, "prof", true)
 				CONF_HANDLE_CHAR_P(opt_prof_prefix,
@@ -1318,8 +1356,6 @@ malloc_init_hard_a0_locked()
 	 * malloc_ncpus().
 	 */
 	narenas_auto = 1;
-	narenas_total_set(narenas_auto);
-	arenas = &a0;
 	memset(arenas, 0, sizeof(arena_t *) * narenas_auto);
 	/*
 	 * Initialize one arena here.  The rest are lazily created in
@@ -1328,6 +1364,7 @@ malloc_init_hard_a0_locked()
 	if (arena_init(TSDN_NULL, 0) == NULL)
 		return (true);
 
+	a0 = arena_get(TSDN_NULL, 0, false);
 	malloc_init_state = malloc_init_a0_initialized;
 
 	return (false);
@@ -1385,6 +1422,21 @@ malloc_init_hard_finish(tsdn_t *tsdn)
 		else
 			opt_narenas = 1;
 	}
+
+	assert(ncpus);
+	if (opt_perCPU_arena) {
+		if (ncpus > MALLOCX_ARENA_MAX) {
+			malloc_printf("<jemalloc>: narenas w/ percpu arena beyond limit (%d)\n",
+		    ncpus);
+			return (true);
+		}
+		if (opt_perCPU_arena == 1 || ncpus == 1) {
+			opt_narenas = ncpus;
+		} else {
+			opt_narenas = ncpus/2;
+		}
+	}
+
 	narenas_auto = opt_narenas;
 	/*
 	 * Limit the number of arenas to the indexing range of MALLOCX_ARENA().
@@ -1395,14 +1447,6 @@ malloc_init_hard_finish(tsdn_t *tsdn)
 		    narenas_auto);
 	}
 	narenas_total_set(narenas_auto);
-
-	/* Allocate and initialize arenas. */
-	arenas = (arena_t **)base_alloc(tsdn, sizeof(arena_t *) *
-	    (MALLOCX_ARENA_MAX+1));
-	if (arenas == NULL)
-		return (true);
-	/* Copy the pointer to the one arena that was already initialized. */
-	arena_set(0, a0);
 
 	malloc_init_state = malloc_init_initialized;
 	malloc_slow_flag_init();
@@ -1451,6 +1495,12 @@ malloc_init_hard(void)
 
 	malloc_mutex_unlock(tsd_tsdn(tsd), &init_lock);
 	malloc_tsd_boot1();
+
+	if (opt_arena_purging_thread) {
+		/* Need to finish init first before creating new purge threads. */
+		arena_purge_thread_init(0);
+	}
+
 	return (false);
 }
 

@@ -72,6 +72,33 @@ TEST_END
 int
 main(void)
 {
+    int *a[1000], i;
+
+    for (i = 0; i < 10; i++) {
+        a[i] = malloc(8);
+        *a[i] = i*i;
+    }
+
+    for (i = 0; i < 10; i++) {
+//        printf("%p  %d: %d\n", a[i], i, *a[i]);
+    }
+    for (i = 0; i < 10; i++) {
+        free(a[i]);
+    }
+
+
+    for (i = 0; i < 10; i++) {
+        a[i] = malloc(8);
+        *a[i] = i+3;
+    }
+
+    for (i = 0; i < 10; i++) {
+//        printf("%p  %d: %d\n", a[i], i, *a[i]);
+    }
+    for (i = 0; i < 10; i++) {
+        free(a[i]);
+    }
+
 
 	return (test(
 	    test_zero_small,

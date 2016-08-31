@@ -4,11 +4,17 @@
 /******************************************************************************/
 /* Data. */
 
-bool	opt_acache = false;
+bool	opt_acache = true;
 /* Size of acache, relative to tcache. */
-unsigned opt_acache_size_ratio = ACACHE_SIZE_RATIO_DEFAULT;
+unsigned	opt_acache_size_ratio = ACACHE_SIZE_RATIO_DEFAULT;
 /* Bypass acache for small items to avoid fragmentation. */
-unsigned opt_acache_bypass = ACACHE_BYPASS_IND_DEFAULT;
+unsigned	opt_acache_bypass = ACACHE_BYPASS_IND_DEFAULT;
+
+/* 1: one arena per core. 2: one arena per physical CPU. */
+unsigned	opt_perCPU_arena = 0;
+
+#define PURGE_THREAD_INTERVAL 1
+bool	opt_arena_purging_thread = false;
 
 purge_mode_t	opt_purge = PURGE_DEFAULT;
 const char	*purge_mode_names[] = {
@@ -3534,6 +3540,65 @@ arena_nthreads_dec(arena_t *arena, bool internal)
 {
 
 	atomic_sub_u(&arena->nthreads[internal], 1);
+}
+
+int set_thread_affinity(int cpu) {
+	cpu_set_t cpuset;
+	CPU_ZERO(&cpuset);
+	CPU_SET(cpu, &cpuset);
+
+	return pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+}
+
+void *
+periodic_purge(void *arena_ind)
+{
+	int ind;
+	arena_t *arena;
+	tsd_t *tsd;
+	tsdn_t *tsdn;
+
+	ind = (uint64_t)arena_ind;
+	if (opt_perCPU_arena) {
+		if (set_thread_affinity((int)ind)) {
+			malloc_printf("<jemalloc>: Purging thread affinity setting failure.\n");
+		}
+	}
+	arena = arenas[ind];
+	assert(arena);
+	tsd = tsd_fetch();
+	tsdn = tsd_tsdn(tsd);
+
+	while (1) {
+		sleep(PURGE_THREAD_INTERVAL);
+		arena_purge(tsdn, arena, false);
+	}
+}
+
+bool
+arena_purge_thread_init(unsigned ind)
+{
+	pthread_t purge_thd;
+	int ret;
+	unsigned n_retry = 0;
+
+	if (!opt_arena_purging_thread)
+		return (false);
+
+	/* Dedicate one purging thread to each arena. */
+	while ((ret = pthread_create(&purge_thd, NULL, periodic_purge,
+	    (void *)(uint64_t)ind))) {
+		if (ret == EAGAIN && n_retry++ < 10) {
+			sched_yield();
+			continue;
+		}
+
+		malloc_printf("<jemalloc>: arena %d purge thread creation failed (%d).\n",
+		    ind, ret);
+		return (true);
+	}
+
+	return (false);
 }
 
 arena_t *

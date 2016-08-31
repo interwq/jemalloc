@@ -460,7 +460,7 @@ extern unsigned	narenas_auto;
  * Arenas that are used to service external requests.  Not all elements of the
  * arenas array are necessarily used; arenas are created lazily as needed.
  */
-extern arena_t	**arenas;
+extern arena_t	*arenas[];
 
 /*
  * index2size_tab encodes the same information as could be computed (at
@@ -571,6 +571,9 @@ arena_tdata_t	*arena_tdata_get(tsd_t *tsd, unsigned ind,
     bool refresh_if_missing);
 arena_t	*arena_get(tsdn_t *tsdn, unsigned ind, bool init_if_missing);
 ticker_t	*decay_ticker_get(tsd_t *tsd, unsigned ind);
+unsigned long malloc_getcpu(void);
+void percpu_cache_arena_update(tsd_t *tsd, uint32_t cpu);
+
 #endif
 
 #if (defined(JEMALLOC_ENABLE_INLINE) || defined(JEMALLOC_C_))
@@ -802,6 +805,55 @@ sa2u(size_t size, size_t alignment)
 	return (usize);
 }
 
+JEMALLOC_ALWAYS_INLINE unsigned long
+malloc_getcpu(void)
+{
+	/* TODO: this is Linux specific. Need equivalent on BSD & OSX. */
+	unsigned long cpuid = sched_getcpu();
+
+	if (opt_perCPU_arena > 1) {
+		if (cpuid >= ncpus/2)
+			cpuid -= ncpus/2;
+	}
+
+	return cpuid;
+}
+
+JEMALLOC_ALWAYS_INLINE
+arena_t	*arena_get(tsdn_t *tsdn, unsigned ind, bool init_if_missing);
+
+JEMALLOC_ALWAYS_INLINE void
+percpu_cache_arena_update(tsd_t *tsd, uint32_t cpu)
+{
+	arena_t *oldarena;
+	unsigned oldind;
+
+	if (!tsd) return;
+
+	oldarena = tsd_arena_get(tsd);
+	assert(oldarena);
+	oldind = oldarena->ind;
+	assert(oldarena == arenas[oldind]);
+
+	if (unlikely(oldind != cpu)) {
+		unsigned newind = cpu;
+		arena_t *newarena = arena_get(tsd_tsdn(tsd), newind, true);
+		assert(newarena);
+
+		/* arena_get may have done the work for us (recursion). */
+		if (tsd_arena_get(tsd) == oldarena) {
+		/* Set new arena/tcache associations. */
+			arena_migrate(tsd, oldind, newind);
+			if (config_tcache) {
+				tcache_t *tcache = tsd_tcache_get(tsd);
+				if (tcache) {
+					tcache_arena_reassociate(tsd_tsdn(tsd), tcache, oldarena, newarena);
+				}
+			}
+		}
+	}
+}
+
 /* Choose an arena based on a per-thread value. */
 JEMALLOC_INLINE arena_t *
 arena_choose_impl(tsd_t *tsd, arena_t *arena, bool internal)
@@ -814,6 +866,19 @@ arena_choose_impl(tsd_t *tsd, arena_t *arena, bool internal)
 	ret = internal ? tsd_iarena_get(tsd) : tsd_arena_get(tsd);
 	if (unlikely(ret == NULL))
 		ret = arena_choose_hard(tsd, internal);
+
+	if (opt_perCPU_arena) {
+		unsigned cpu;
+
+		if (unlikely(ret->last_thd != tsd_tsdn(tsd))) {
+			cpu = malloc_getcpu();
+			if (ret->ind != cpu) {
+				percpu_cache_arena_update(tsd, cpu);
+				ret = tsd_arena_get(tsd);
+			}
+			ret->last_thd = tsd_tsdn(tsd);
+		}
+	}
 
 	return (ret);
 }

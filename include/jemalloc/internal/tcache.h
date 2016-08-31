@@ -293,8 +293,13 @@ tcache_alloc_small(tsd_t *tsd, arena_t *arena, tcache_t *tcache, size_t size,
 		if (unlikely(arena == NULL))
 			return (NULL);
 
-		ret = tcache_alloc_small_hard(tsd_tsdn(tsd), arena, tcache,
-		    tbin, binind, &tcache_hard_success);
+		/* arena_choose may have refilled (recursion). */
+		if (tbin->ncached == 0) {
+			ret = tcache_alloc_small_hard(tsd_tsdn(tsd), arena, tcache,
+			    tbin, binind, &tcache_hard_success);
+		} else {
+			ret = tcache_alloc_easy(tbin, &tcache_hard_success);
+		}
 		if (tcache_hard_success == false)
 			return (NULL);
 	}

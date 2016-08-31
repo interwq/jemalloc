@@ -64,6 +64,6 @@ int
 main(void)
 {
 
-	return (test(
-	    test_MALLOCX_ARENA));
+	/* return (test( */
+	/*     test_MALLOCX_ARENA)); */
 }

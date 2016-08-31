@@ -202,9 +202,60 @@ TEST_BEGIN(test_alignment_and_size)
 }
 TEST_END
 
+#define INNER 20
+#define NTHDS 10
+#define MINSIZE 30000
+#define MAXSIZE 30000
+
+void *worker(void *id)
+{
+    volatile void *p[INNER];
+    int i, j;
+    printf("thd %d going to run\n", (int)id);
+    for (j = MINSIZE; j < MAXSIZE+1; j <<= 1) {
+        for (i=0; i<INNER; i++) {
+            if (i == INNER-1) {
+                volatile test = 0;
+                if (test) return;
+            }
+
+            p[i] = malloc(j);
+            printf("thd %d, %d: got %p\n", (int)id, i, p[i]);
+        }
+        for (i=0; i<INNER; i++) {
+            if (i) {
+                volatile test = 0;
+                if (test) return;
+            }
+            free(p[i]);
+        }
+    }
+    printf("thd %d going to sleep\n", (int)id);
+//    stats_print_atexit();
+    sleep(3600);
+}
+
 int
 main(void)
 {
+    pthread_t thds[500];
+    int i;
+    volatile int spin = 1;
+    /* printf("going to...\n"); */
+    /* for (i = 0; i < NTHDS; i++) { */
+    /*     pthread_create(&thds[i], NULL, worker, (void *)i+1); */
+    /* } */
+
+    /* sleep(5); */
+
+	/* malloc_stats_print(NULL, NULL, NULL); */
+
+    /* for (i = 0; i < NTHDS; i++) { */
+    /*     pthread_join(thds[i], NULL); */
+    /* } */
+
+//    while (spin) ;
+//    return 0;
 
 	return (test(
 	    test_overflow,

@@ -186,6 +186,10 @@ tcache_get_hard(tsd_t *tsd)
 	arena = arena_choose(tsd, NULL);
 	if (unlikely(arena == NULL))
 		return (NULL);
+	/* arena_choose may have done it for us (recursion). */
+	if (tsd_tcache_get(tsd))
+		return tsd_tcache_get(tsd);
+
 	return (tcache_create(tsd_tsdn(tsd), arena));
 }
 
@@ -236,7 +240,6 @@ tcache_destroy(tsd_t *tsd, tcache_t *tcache)
 	unsigned i;
 
 	arena = arena_choose(tsd, NULL);
-	tcache_arena_dissociate(tsd_tsdn(tsd), tcache, arena);
 
 	for (i = 0; i < NBINS; i++) {
 		tcache_bin_t *tbin = &tcache->tbins[i];
@@ -266,6 +269,12 @@ tcache_destroy(tsd_t *tsd, tcache_t *tcache)
 			malloc_mutex_unlock(tsd_tsdn(tsd), &arena->lock);
 		}
 	}
+
+	if (opt_perCPU_arena) {
+		/* Associated arena could have changed during flush. */
+		arena = arena_choose(tsd, NULL);
+	}
+	tcache_arena_dissociate(tsd_tsdn(tsd), tcache, arena);
 
 	if (config_prof && tcache->prof_accumbytes > 0 &&
 	    arena_prof_accum(tsd_tsdn(tsd), arena, tcache->prof_accumbytes))

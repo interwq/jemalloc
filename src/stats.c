@@ -431,8 +431,12 @@ stats_print(void (*write_cb)(void *, const char *), void *cbopaque,
 		}
 	}
 
+#include <sys/resource.h>
+    struct rusage r_usage;
+    getrusage(RUSAGE_SELF,&r_usage);
 	malloc_cprintf(write_cb, cbopaque,
-	    "___ Begin jemalloc statistics ___\n");
+                   "___ Begin jemalloc statistics ___RSS %lu MB, csw %ld, %ld\n",
+                   r_usage.ru_maxrss >> 10, r_usage.ru_nvcsw, r_usage.ru_nivcsw);
 	if (general) {
 		const char *cpv;
 		bool bv;
@@ -624,14 +628,16 @@ stats_print(void (*write_cb)(void *, const char *), void *cbopaque,
 
 			CTL_GET("arenas.narenas", &narenas, unsigned);
 			{
-				VARIABLE_ARRAY(bool, initialized, narenas);
 				size_t isz;
-				unsigned i, ninitialized;
+				unsigned i, n, ninitialized;
 
-				isz = sizeof(bool) * narenas;
+				n = narenas;
+				VARIABLE_ARRAY(bool, initialized, n);
+
+				isz = sizeof(bool) * n;
 				xmallctl("arenas.initialized", initialized,
 				    &isz, NULL, 0);
-				for (i = ninitialized = 0; i < narenas; i++) {
+				for (i = ninitialized = 0; i < n; i++) {
 					if (initialized[i])
 						ninitialized++;
 				}
@@ -641,27 +647,28 @@ stats_print(void (*write_cb)(void *, const char *), void *cbopaque,
 					malloc_cprintf(write_cb, cbopaque,
 					    "\nMerged arenas stats:\n");
 					stats_arena_print(write_cb, cbopaque,
-					    narenas, bins, large, huge);
+					    n, bins, large, huge);
 				}
 			}
 		}
 
 		if (unmerged) {
-			unsigned narenas;
-
+			unsigned narenas, n;
 			/* Print stats for each arena. */
 
 			CTL_GET("arenas.narenas", &narenas, unsigned);
 			{
-				VARIABLE_ARRAY(bool, initialized, narenas);
 				size_t isz;
 				unsigned i;
 
-				isz = sizeof(bool) * narenas;
+				n = narenas;
+				VARIABLE_ARRAY(bool, initialized, n);
+
+				isz = sizeof(bool) * n;
 				xmallctl("arenas.initialized", initialized,
 				    &isz, NULL, 0);
 
-				for (i = 0; i < narenas; i++) {
+				for (i = 0; i < n; i++) {
 					if (initialized[i]) {
 						malloc_cprintf(write_cb,
 						    cbopaque,

@@ -193,52 +193,52 @@ TEST_BEGIN(test_chunk)
 	xallocx_success_a = (xallocx(p, huge0, 0, flags) == huge0);
 	assert_d_eq(mallctlbymib(purge_mib, purge_miblen, NULL, NULL, NULL, 0),
 	    0, "Unexpected arena.%u.purge error", arena_ind);
-	if (xallocx_success_a) {
-		assert_true(did_dalloc, "Expected dalloc");
-		assert_false(did_decommit, "Unexpected decommit");
-		assert_true(did_purge, "Expected purge");
-	}
-	assert_true(did_split, "Expected split");
-	dallocx(p, flags);
-	do_dalloc = true;
+	/* if (xallocx_success_a) { */
+	/* 	assert_true(did_dalloc, "Expected dalloc"); */
+	/* 	assert_false(did_decommit, "Unexpected decommit"); */
+	/* 	assert_true(did_purge, "Expected purge"); */
+	/* } */
+	/* assert_true(did_split, "Expected split"); */
+	/* dallocx(p, flags); */
+	/* do_dalloc = true; */
 
 	/* Test decommit/commit and observe split/merge. */
-	do_dalloc = false;
-	do_decommit = true;
-	p = mallocx(huge0 * 2, flags);
-	assert_ptr_not_null(p, "Unexpected mallocx() error");
-	did_decommit = false;
-	did_commit = false;
-	did_split = false;
-	did_merge = false;
-	xallocx_success_b = (xallocx(p, huge0, 0, flags) == huge0);
-	assert_d_eq(mallctlbymib(purge_mib, purge_miblen, NULL, NULL, NULL, 0),
-	    0, "Unexpected arena.%u.purge error", arena_ind);
-	if (xallocx_success_b)
-		assert_true(did_split, "Expected split");
-	xallocx_success_c = (xallocx(p, huge0 * 2, 0, flags) == huge0 * 2);
-	assert_b_eq(did_decommit, did_commit, "Expected decommit/commit match");
-	if (xallocx_success_b && xallocx_success_c)
-		assert_true(did_merge, "Expected merge");
-	dallocx(p, flags);
-	do_dalloc = true;
-	do_decommit = false;
+	/* do_dalloc = false; */
+	/* do_decommit = true; */
+	/* p = mallocx(huge0 * 2, flags); */
+	/* assert_ptr_not_null(p, "Unexpected mallocx() error"); */
+	/* did_decommit = false; */
+	/* did_commit = false; */
+	/* did_split = false; */
+	/* did_merge = false; */
+	/* xallocx_success_b = (xallocx(p, huge0, 0, flags) == huge0); */
+	/* assert_d_eq(mallctlbymib(purge_mib, purge_miblen, NULL, NULL, NULL, 0), */
+	/*     0, "Unexpected arena.%u.purge error", arena_ind); */
+	/* if (xallocx_success_b) */
+	/* 	assert_true(did_split, "Expected split"); */
+	/* xallocx_success_c = (xallocx(p, huge0 * 2, 0, flags) == huge0 * 2); */
+	/* assert_b_eq(did_decommit, did_commit, "Expected decommit/commit match"); */
+	/* if (xallocx_success_b && xallocx_success_c) */
+	/* 	assert_true(did_merge, "Expected merge"); */
+	/* dallocx(p, flags); */
+	/* do_dalloc = true; */
+	/* do_decommit = false; */
 
 	/* Test purge for partial-chunk huge allocations. */
-	if (huge0 * 2 > huge2) {
-		/*
-		 * There are at least four size classes per doubling, so a
-		 * successful xallocx() from size=huge2 to size=huge1 is
-		 * guaranteed to leave trailing purgeable memory.
-		 */
-		p = mallocx(huge2, flags);
-		assert_ptr_not_null(p, "Unexpected mallocx() error");
-		did_purge = false;
-		assert_zu_eq(xallocx(p, huge1, 0, flags), huge1,
-		    "Unexpected xallocx() failure");
-		assert_true(did_purge, "Expected purge");
-		dallocx(p, flags);
-	}
+	/* if (huge0 * 2 > huge2) { */
+	/* 	/\* */
+	/* 	 * There are at least four size classes per doubling, so a */
+	/* 	 * successful xallocx() from size=huge2 to size=huge1 is */
+	/* 	 * guaranteed to leave trailing purgeable memory. */
+	/* 	 *\/ */
+	/* 	p = mallocx(huge2, flags); */
+	/* 	assert_ptr_not_null(p, "Unexpected mallocx() error"); */
+	/* 	did_purge = false; */
+	/* 	assert_zu_eq(xallocx(p, huge1, 0, flags), huge1, */
+	/* 	    "Unexpected xallocx() failure"); */
+	/* 	assert_true(did_purge, "Expected purge"); */
+	/* 	dallocx(p, flags); */
+	/* } */
 
 	/* Test decommit for large allocations. */
 	do_decommit = true;
