@@ -451,11 +451,6 @@ arena_init(tsdn_t *tsdn, unsigned ind)
 	arena = arena_init_locked(tsdn, ind, &is_new_arena);
 	malloc_mutex_unlock(tsdn, &arenas_lock);
 
-	/* Cannot create new threads during init as it depends on malloc. */
-	if (opt_arena_purging_thread && is_new_arena && ind != 0) {
-		arena_purge_thread_init(ind);
-	}
-
 	return (arena);
 }
 
@@ -583,19 +578,13 @@ arena_choose_hard(tsd_t *tsd, bool internal)
 	arena_t *ret JEMALLOC_CC_SILENCE_INIT(NULL);
 
 	if (opt_perCPU_arena) {
-		unsigned choose = malloc_getcpu();
+		unsigned choose = percpu_arena_choose();
 		ret = arena_get(tsd_tsdn(tsd), choose, true);
 		assert(ret);
-		/*
-		 * arena_get may create new arena and possibly new purge threads, which
-		 * leads to recursive malloc calls.
-		 */
-		if (!tsd_arena_get(tsd)) {
-			arena_bind(tsd, ret->ind, false);
-			arena_bind(tsd, ret->ind, true);
-		}
+		arena_bind(tsd, ret->ind, false);
+		arena_bind(tsd, ret->ind, true);
 
-		return tsd_arena_get(tsd);
+		return ret;
 	}
 
 	if (narenas_auto > 1) {
@@ -674,15 +663,6 @@ arena_choose_hard(tsd_t *tsd, bool internal)
 			arena_bind(tsd, choose[j], !!j);
 		}
 		malloc_mutex_unlock(tsd_tsdn(tsd), &arenas_lock);
-
-		/* After unlock, init purge threads if we created any new arenas. */
-		if (opt_arena_purging_thread) {
-			for (j = 0; j < 2; j++) {
-				if (is_new_arena[j]) {
-					arena_purge_thread_init(choose[j]);
-				}
-			}
-		}
 	} else {
 		ret = arena_get(tsd_tsdn(tsd), 0, false);
 		arena_bind(tsd, 0, false);
@@ -1255,7 +1235,7 @@ malloc_conf_init(void)
 				    "acache_bypass", 0, NBINS, false);
 			}
 
-			CONF_HANDLE_BOOL(opt_perCPU_arena, "percpu_arena", true);
+			CONF_HANDLE_UNSIGNED(opt_perCPU_arena, "percpu_arena", 0, 2, false);
 			CONF_HANDLE_BOOL(opt_arena_purging_thread, "purge_thread", true);
 
 			if (config_prof) {
@@ -1433,7 +1413,7 @@ malloc_init_hard_finish(tsdn_t *tsdn)
 		if (opt_perCPU_arena == 1 || ncpus == 1) {
 			opt_narenas = ncpus;
 		} else {
-			opt_narenas = ncpus/2;
+			opt_narenas = ncpus / 2;
 		}
 	}
 
@@ -1497,8 +1477,12 @@ malloc_init_hard(void)
 	malloc_tsd_boot1();
 
 	if (opt_arena_purging_thread) {
-		/* Need to finish init first before creating new purge threads. */
-		arena_purge_thread_init(0);
+		/*
+		 * Need to finish init & unlock first before creating new purge
+		 * threads (pthread_create depends on malloc).
+		 */
+		if (a0_purge_thread_init())
+			return (true);
 	}
 
 	return (false);

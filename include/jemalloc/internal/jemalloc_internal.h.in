@@ -819,6 +819,21 @@ malloc_getcpu(void)
 	return cpuid;
 }
 
+/* Choose arena based on cpuid. */
+JEMALLOC_ALWAYS_INLINE unsigned long
+percpu_arena_choose(void)
+{
+	/* TODO: this is Linux specific. Need equivalent on BSD & OSX. */
+	unsigned long arena_ind = malloc_getcpu();
+
+	if (opt_perCPU_arena > 1) {
+		if (arena_ind >= ncpus/2)
+			arena_ind -= ncpus/2;
+	}
+
+	return arena_ind;
+}
+
 JEMALLOC_ALWAYS_INLINE
 arena_t	*arena_get(tsdn_t *tsdn, unsigned ind, bool init_if_missing);
 
@@ -836,19 +851,17 @@ percpu_cache_arena_update(tsd_t *tsd, uint32_t cpu)
 	assert(oldarena == arenas[oldind]);
 
 	if (unlikely(oldind != cpu)) {
+		/* TODO: try flushing small tcache? */
 		unsigned newind = cpu;
 		arena_t *newarena = arena_get(tsd_tsdn(tsd), newind, true);
 		assert(newarena);
 
-		/* arena_get may have done the work for us (recursion). */
-		if (tsd_arena_get(tsd) == oldarena) {
 		/* Set new arena/tcache associations. */
-			arena_migrate(tsd, oldind, newind);
-			if (config_tcache) {
-				tcache_t *tcache = tsd_tcache_get(tsd);
-				if (tcache) {
-					tcache_arena_reassociate(tsd_tsdn(tsd), tcache, oldarena, newarena);
-				}
+		arena_migrate(tsd, oldind, newind);
+		if (config_tcache) {
+			tcache_t *tcache = tsd_tcache_get(tsd);
+			if (tcache) {
+				tcache_arena_reassociate(tsd_tsdn(tsd), tcache, oldarena, newarena);
 			}
 		}
 	}
@@ -867,13 +880,14 @@ arena_choose_impl(tsd_t *tsd, arena_t *arena, bool internal)
 	if (unlikely(ret == NULL))
 		ret = arena_choose_hard(tsd, internal);
 
+	assert(ret);
 	if (opt_perCPU_arena) {
-		unsigned cpu;
+		unsigned ind;
 
 		if (unlikely(ret->last_thd != tsd_tsdn(tsd))) {
-			cpu = malloc_getcpu();
-			if (ret->ind != cpu) {
-				percpu_cache_arena_update(tsd, cpu);
+			ind = percpu_arena_choose();
+			if (ret->ind != ind) {
+				percpu_cache_arena_update(tsd, ind);
 				ret = tsd_arena_get(tsd);
 			}
 			ret->last_thd = tsd_tsdn(tsd);

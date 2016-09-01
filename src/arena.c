@@ -10,11 +10,8 @@ unsigned	opt_acache_size_ratio = ACACHE_SIZE_RATIO_DEFAULT;
 /* Bypass acache for small items to avoid fragmentation. */
 unsigned	opt_acache_bypass = ACACHE_BYPASS_IND_DEFAULT;
 
-/* 1: one arena per core. 2: one arena per physical CPU. */
-unsigned	opt_perCPU_arena = 0;
-
-#define PURGE_THREAD_INTERVAL 1
-bool	opt_arena_purging_thread = false;
+unsigned	opt_perCPU_arena = PERCPU_ARENA_DEFAULT;
+bool	opt_arena_purging_thread = PURGE_THREAD_DEFAULT;
 
 purge_mode_t	opt_purge = PURGE_DEFAULT;
 const char	*purge_mode_names[] = {
@@ -3550,24 +3547,25 @@ int set_thread_affinity(int cpu) {
 	return pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
 }
 
-void *
-periodic_purge(void *arena_ind)
+static void
+purge_thread_init(unsigned ind, arena_t **arena, tsdn_t **tsdn)
 {
-	int ind;
-	arena_t *arena;
 	tsd_t *tsd;
-	tsdn_t *tsdn;
 
-	ind = (uint64_t)arena_ind;
-	if (opt_perCPU_arena) {
+	if (opt_perCPU_arena && ind < ncpus) {
 		if (set_thread_affinity((int)ind)) {
 			malloc_printf("<jemalloc>: Purging thread affinity setting failure.\n");
 		}
 	}
-	arena = arenas[ind];
-	assert(arena);
 	tsd = tsd_fetch();
-	tsdn = tsd_tsdn(tsd);
+	*tsdn = tsd_tsdn(tsd);
+
+	*arena = arenas[ind];
+	assert(arena);
+}
+
+static void periodic_purge(arena_t *arena, tsdn_t *tsdn)
+{
 
 	while (1) {
 		sleep(PURGE_THREAD_INTERVAL);
@@ -3575,28 +3573,109 @@ periodic_purge(void *arena_ind)
 	}
 }
 
+void *
+arena_purge_thread(void *arena_ind)
+{
+	arena_t *arena;
+	tsdn_t *tsdn;
+	unsigned ind = (unsigned)(uintptr_t)arena_ind;
+
+	assert(ind && ind < narenas_total_get());
+	purge_thread_init(ind, &arena, &tsdn);
+	periodic_purge(arena, tsdn);
+
+	not_reached();
+	return (NULL);
+}
+
+
+JEMALLOC_INLINE_C unsigned
+purge_thread_add(tsdn_t *tsdn, unsigned n_created)
+{
+	unsigned n_needed, n_new_thds, i, narenas;
+	arena_t *arena;
+	pthread_t thd;
+
+	narenas = narenas_total_get();
+	assert(narenas > n_created);
+	n_needed = narenas_total_get() - n_created;
+	n_new_thds = 0;
+
+	for (i = 1; i < narenas; i++) {
+		arena = arena_get(tsdn, i, false);
+		if (arena && arena->purge_thread == 0) {
+			/*
+			 * a0 purge thread will be calling pthread_create, which depends on
+			 * malloc. This means the # of assigned threads on a0 will be at least 1.
+			 */
+			if (!pthread_create(&thd, NULL, arena_purge_thread,
+			    (void *)(uint64_t)arena->ind)) {
+				arena->purge_thread = thd;
+				/* If for any reason the thread creation failed, retry next time. */
+				n_new_thds++;
+			}
+			if (--n_needed == 0) break;
+		}
+	}
+
+	return n_new_thds;
+}
+
+/*
+ * In addition to purging, a0 purge thread is also responsible for creating new
+ * purge threads for other arenas.
+ */
+static void
+a0_periodic_purge(arena_t *arena, tsdn_t *tsdn)
+{
+	/* Current thread is a0 purge thread. */
+	static unsigned n_purge_threads = 1;
+
+	while (1) {
+		if (n_purge_threads != narenas_total_get()) {
+			n_purge_threads += purge_thread_add(tsdn, n_purge_threads);
+		}
+		sleep(PURGE_THREAD_INTERVAL);
+		arena_purge(tsdn, arena, false);
+	}
+}
+
+static void *
+a0_purge_thread(UNUSED void *ind)
+{
+	arena_t *arena;
+	tsdn_t *tsdn;
+
+	purge_thread_init(0, &arena, &tsdn);
+	a0_periodic_purge(arena, tsdn);
+
+	not_reached();
+	return (NULL);
+}
+
 bool
-arena_purge_thread_init(unsigned ind)
+a0_purge_thread_init(void)
 {
 	pthread_t purge_thd;
+	arena_t *a0;
 	int ret;
-	unsigned n_retry = 0;
+	unsigned n_retry = 0, max_retry = 128;
 
-	if (!opt_arena_purging_thread)
-		return (false);
+	assert(opt_arena_purging_thread);
+	a0 = arena_get(TSDN_NULL, 0, false);
 
-	/* Dedicate one purging thread to each arena. */
-	while ((ret = pthread_create(&purge_thd, NULL, periodic_purge,
-	    (void *)(uint64_t)ind))) {
-		if (ret == EAGAIN && n_retry++ < 10) {
-			sched_yield();
-			continue;
+	/* a0 purge thread is created during malloc_init. */
+	while ((ret = pthread_create(&purge_thd, NULL, a0_purge_thread, NULL))) {
+		sched_yield();
+		if (++n_retry % 8 == 0) {
+			malloc_printf("<jemalloc>: a0 purge thread creation failed (%d)."
+			    "Retrying.\n", ret);
 		}
-
-		malloc_printf("<jemalloc>: arena %d purge thread creation failed (%d).\n",
-		    ind, ret);
-		return (true);
+		if (n_retry > max_retry) {
+			return (true);
+		}
 	}
+	a0->purge_thread = purge_thd;
 
 	return (false);
 }
@@ -3744,6 +3823,7 @@ arena_new(tsdn_t *tsdn, unsigned ind)
 		if (config_stats)
 			memset(&bin->stats, 0, sizeof(malloc_bin_stats_t));
 	}
+	arena->purge_thread = 0;
 
 	return (arena);
 }

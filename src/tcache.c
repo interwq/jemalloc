@@ -186,9 +186,6 @@ tcache_get_hard(tsd_t *tsd)
 	arena = arena_choose(tsd, NULL);
 	if (unlikely(arena == NULL))
 		return (NULL);
-	/* arena_choose may have done it for us (recursion). */
-	if (tsd_tcache_get(tsd))
-		return tsd_tcache_get(tsd);
 
 	return (tcache_create(tsd_tsdn(tsd), arena));
 }

@@ -35,6 +35,12 @@ typedef enum {
 /* Number of event ticks between time checks. */
 #define	DECAY_NTICKS_PER_UPDATE	1000
 
+/* 0: disable. 1: one arena per core. 2: one arena per physical CPU. */
+#define PERCPU_ARENA_DEFAULT 0
+#define PURGE_THREAD_DEFAULT false
+/* # of seconds between purging. */
+#define PURGE_THREAD_INTERVAL 1
+
 typedef struct arena_runs_dirty_link_s arena_runs_dirty_link_t;
 typedef struct arena_avail_links_s arena_avail_links_t;
 typedef struct arena_run_s arena_run_t;
@@ -526,6 +532,7 @@ struct arena_s {
 	/* bins is used to store trees of free regions. */
 	arena_bin_t		bins[NBINS];
 
+	pthread_t		purge_thread;
 	/* Bins in acache is dynamically sized like tcache bins. When we get rid of
 	 * runs_avail (last member currently), acache can be the last and doesn't have
 	 * to be a pointer. */
@@ -679,7 +686,7 @@ void	arena_prefork2(tsdn_t *tsdn, arena_t *arena);
 void	arena_prefork3(tsdn_t *tsdn, arena_t *arena);
 void	arena_postfork_parent(tsdn_t *tsdn, arena_t *arena);
 void	arena_postfork_child(tsdn_t *tsdn, arena_t *arena);
-bool	arena_purge_thread_init(unsigned ind);
+bool	a0_purge_thread_init(void);
 
 
 #endif /* JEMALLOC_H_EXTERNS */
