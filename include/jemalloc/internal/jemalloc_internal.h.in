@@ -573,6 +573,7 @@ arena_t	*arena_get(tsdn_t *tsdn, unsigned ind, bool init_if_missing);
 ticker_t	*decay_ticker_get(tsd_t *tsd, unsigned ind);
 unsigned long malloc_getcpu(void);
 unsigned long percpu_arena_choose(void);
+unsigned long percpu_arena_max_ind(void);
 void percpu_cache_arena_update(tsd_t *tsd, uint32_t cpu);
 
 #endif
@@ -819,21 +820,40 @@ malloc_getcpu(void)
 JEMALLOC_ALWAYS_INLINE unsigned long
 percpu_arena_choose(void)
 {
-	unsigned long arena_ind = malloc_getcpu();
+	unsigned long arena_ind, cpuid;
 
+	cpuid = malloc_getcpu();
 	assert(opt_perCPU_arena != percpu_arena_disable);
-	if (opt_perCPU_arena == per_phycpu_arena_enable) {
-		if (arena_ind >= ncpus / 2) {
-			/* Hyper threads on the same CPU share arena. */
-			arena_ind -= ncpus / 2;
-		}
+	if (opt_perCPU_arena == per_phycpu_arena_enable &&
+	    cpuid >= ncpus / 2) {
+		/* Hyper threads on the same CPU share arena. */
+		arena_ind = cpuid - ncpus / 2;
+	} else {
+		arena_ind = cpuid;
 	}
 
 	return arena_ind;
 }
 
-JEMALLOC_ALWAYS_INLINE
-arena_t	*arena_get(tsdn_t *tsdn, unsigned ind, bool init_if_missing);
+/* arenas[0...max_ind] is the automatic range. */
+JEMALLOC_ALWAYS_INLINE unsigned long
+percpu_arena_max_ind(void)
+{
+
+	assert(opt_perCPU_arena != percpu_arena_disable);
+	if (opt_perCPU_arena == per_phycpu_arena_enable && ncpus > 1) {
+		if (ncpus % 2) {
+			/* This likely means a misconfig. */
+			return ncpus / 2;
+		}
+		return ncpus / 2 - 1;
+	} else {
+		return ncpus - 1;
+	}
+}
+
+JEMALLOC_ALWAYS_INLINE arena_t	*
+arena_get(tsdn_t *tsdn, unsigned ind, bool init_if_missing);
 
 JEMALLOC_ALWAYS_INLINE void
 percpu_cache_arena_update(tsd_t *tsd, uint32_t cpu)
@@ -879,17 +899,14 @@ arena_choose_impl(tsd_t *tsd, arena_t *arena, bool internal)
 		ret = arena_choose_hard(tsd, internal);
 
 	assert(ret);
-	if (opt_perCPU_arena != percpu_arena_disable) {
-		unsigned ind;
-
-		if (unlikely(ret->last_thd != tsd_tsdn(tsd))) {
-			ind = percpu_arena_choose();
-			if (ret->ind != ind) {
-				percpu_cache_arena_update(tsd, ind);
-				ret = tsd_arena_get(tsd);
-			}
-			ret->last_thd = tsd_tsdn(tsd);
+	if (opt_perCPU_arena != percpu_arena_disable
+	    && unlikely(ret->last_thd != tsd_tsdn(tsd))) {
+		unsigned ind = percpu_arena_choose();
+		if (ret->ind != ind) {
+			percpu_cache_arena_update(tsd, ind);
+			ret = tsd_arena_get(tsd);
 		}
+		ret->last_thd = tsd_tsdn(tsd);
 	}
 
 	return (ret);

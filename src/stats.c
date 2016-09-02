@@ -656,6 +656,7 @@ stats_print(void (*write_cb)(void *, const char *), void *cbopaque,
 
 		if (unmerged) {
 			unsigned narenas;
+
 			/* Print stats for each arena. */
 
 			CTL_GET("arenas.narenas", &narenas, unsigned);

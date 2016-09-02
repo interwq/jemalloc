@@ -284,7 +284,6 @@ TEST_BEGIN(test_tcache)
 	/* Cache some allocations. */
 	for (i = 0; i < NTCACHES; i++) {
 		ps[i] = mallocx(psz, MALLOCX_TCACHE(tis[i]));
-        printf("cached mallocx %d: %p\n", i, ps[i]);
 		assert_ptr_not_null(ps[i], "Unexpected mallocx() failure, i=%u",
 		    i);
 		dallocx(ps[i], MALLOCX_TCACHE(tis[i]));
@@ -296,27 +295,27 @@ TEST_BEGIN(test_tcache)
 	}
 
 	/* Verify that tcaches allocate cached regions. */
-	/* for (i = 0; i < NTCACHES; i++) { */
-	/* 	void *p0 = ps[i]; */
-	/* 	ps[i] = mallocx(psz, MALLOCX_TCACHE(tis[i])); */
-	/* 	assert_ptr_not_null(ps[i], "Unexpected mallocx() failure, i=%u", */
-	/* 	    i); */
-	/* 	assert_ptr_eq(ps[i], p0, */
-	/* 	    "Expected mallocx() to allocate cached region, i=%u", i); */
-	/* } */
+	for (i = 0; i < NTCACHES; i++) {
+		void *p0 = ps[i];
+		ps[i] = mallocx(psz, MALLOCX_TCACHE(tis[i]));
+		assert_ptr_not_null(ps[i], "Unexpected mallocx() failure, i=%u",
+		    i);
+		assert_ptr_eq(ps[i], p0,
+		    "Expected mallocx() to allocate cached region, i=%u", i);
+	}
 
-	/* /\* Verify that reallocation uses cached regions. *\/ */
-	/* for (i = 0; i < NTCACHES; i++) { */
-	/* 	void *q0 = qs[i]; */
-	/* 	qs[i] = rallocx(ps[i], qsz, MALLOCX_TCACHE(tis[i])); */
-	/* 	assert_ptr_not_null(qs[i], "Unexpected rallocx() failure, i=%u", */
-	/* 	    i); */
-	/* 	assert_ptr_eq(qs[i], q0, */
-	/* 	    "Expected rallocx() to allocate cached region, i=%u", i); */
-	/* 	/\* Avoid undefined behavior in case of test failure. *\/ */
-	/* 	if (qs[i] == NULL) */
-	/* 		qs[i] = ps[i]; */
-	/* } */
+	/* Verify that reallocation uses cached regions. */
+	for (i = 0; i < NTCACHES; i++) {
+		void *q0 = qs[i];
+		qs[i] = rallocx(ps[i], qsz, MALLOCX_TCACHE(tis[i]));
+		assert_ptr_not_null(qs[i], "Unexpected rallocx() failure, i=%u",
+		    i);
+		assert_ptr_eq(qs[i], q0,
+		    "Expected rallocx() to allocate cached region, i=%u", i);
+		/* Avoid undefined behavior in case of test failure. */
+		if (qs[i] == NULL)
+			qs[i] = ps[i];
+	}
 	for (i = 0; i < NTCACHES; i++)
 		dallocx(qs[i], MALLOCX_TCACHE(tis[i]));
 
@@ -485,20 +484,20 @@ TEST_BEGIN(test_arena_i_dss)
 	assert_str_ne(dss_prec_old, "primary",
 	    "Unexpected value for dss precedence");
 
-	/* mib[1] = narenas_total_get(); */
-	/* dss_prec_new = "disabled"; */
-	/* assert_d_eq(mallctlbymib(mib, miblen, &dss_prec_old, &sz, &dss_prec_new, */
-	/*     sizeof(dss_prec_new)), 0, "Unexpected mallctl() failure"); */
-	/* assert_str_ne(dss_prec_old, "primary", */
-	/*     "Unexpected default for dss precedence"); */
+	mib[1] = narenas_total_get();
+	dss_prec_new = "disabled";
+	assert_d_eq(mallctlbymib(mib, miblen, &dss_prec_old, &sz, &dss_prec_new,
+	    sizeof(dss_prec_new)), 0, "Unexpected mallctl() failure");
+	assert_str_ne(dss_prec_old, "primary",
+	    "Unexpected default for dss precedence");
 
-	/* assert_d_eq(mallctlbymib(mib, miblen, &dss_prec_new, &sz, &dss_prec_old, */
-	/*     sizeof(dss_prec_new)), 0, "Unexpected mallctl() failure"); */
+	assert_d_eq(mallctlbymib(mib, miblen, &dss_prec_new, &sz, &dss_prec_old,
+	    sizeof(dss_prec_new)), 0, "Unexpected mallctl() failure");
 
-	/* assert_d_eq(mallctlbymib(mib, miblen, &dss_prec_old, &sz, NULL, 0), 0, */
-	/*     "Unexpected mallctl() failure"); */
-	/* assert_str_ne(dss_prec_old, "primary", */
-	/*     "Unexpected value for dss precedence"); */
+	assert_d_eq(mallctlbymib(mib, miblen, &dss_prec_old, &sz, NULL, 0), 0,
+	    "Unexpected mallctl() failure");
+	assert_str_ne(dss_prec_old, "primary",
+	    "Unexpected value for dss precedence");
 }
 TEST_END
 
@@ -713,8 +712,8 @@ main(void)
 	    test_mallctl_opt,
 	    test_manpage_example,
 	    test_tcache_none,
-	    /* test_tcache, */
-	    /* test_thread_arena, */
+	    test_tcache,
+	    test_thread_arena,
 	    test_arena_i_lg_dirty_mult,
 	    test_arena_i_decay_time,
 	    test_arena_i_purge,
@@ -727,6 +726,6 @@ main(void)
 	    test_arenas_bin_constants,
 	    test_arenas_lrun_constants,
 	    test_arenas_hchunk_constants,
-	    /* test_arenas_extend, */
+	    test_arenas_extend,
 	    test_stats_arenas));
 }

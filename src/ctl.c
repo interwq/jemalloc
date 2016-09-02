@@ -1342,6 +1342,17 @@ thread_arena_ctl(tsd_t *tsd, const size_t *mib, size_t miblen, void *oldp,
 			goto label_return;
 		}
 
+		if (opt_perCPU_arena != percpu_arena_disable) {
+			if (newind <= percpu_arena_max_ind()) {
+				/*
+				 * If perCPU arena is enabled, thread_arena control is not allowed for
+				 * the auto arena range.
+				 */
+				ret = EFAULT;
+				goto label_return;
+			}
+		}
+
 		/* Initialize arena if necessary. */
 		newarena = arena_get(tsd_tsdn(tsd), newind, true);
 		if (newarena == NULL) {

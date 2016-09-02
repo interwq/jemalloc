@@ -353,7 +353,7 @@ struct arena_s {
 	unsigned		ind;
 	/*
 	 * When perCPU arena is enabled, to amortize the cost of reading / updating
-	 * the current CPU id, track the most recent thread accesing this arena, and
+	 * the current CPU id, track the most recent thread accessing this arena, and
 	 * only read CPU if there is a mismatch.
 	 */
 	tsdn_t		*last_thd;
@@ -1877,25 +1877,33 @@ arena_cache_stats_merge_locked(arena_t *arena, arena_bin_t *bin,
 {
 	uint64_t queued_nrequests;
 
+	if (is_large) {
+		assert(binind >= NBINS);
+		arena->stats.nrequests_large += nrequests;
+		arena->stats.lstats[binind - NBINS].nrequests += nrequests;
+	} else {
+		bin->stats.nflushes++;
+		bin->stats.nrequests += nrequests;
+	}
+
 	if (!config_acache || !opt_acache)
 		return;
 
 	/* Called w/ arena or bin lock. Thus read + atomic_sub is safe. */
 	queued_nrequests = ACCESS_ONCE(cbin->queued_nrequests);
 
-	if (nrequests || queued_nrequests) {
+	if (queued_nrequests) {
 		atomic_sub_uint64(&cbin->queued_nrequests, queued_nrequests);
 
 		if (is_large) {
 			assert(binind >= NBINS);
-			arena->stats.nrequests_large += nrequests + queued_nrequests;
-			arena->stats.lstats[binind - NBINS].nrequests +=
-				nrequests + queued_nrequests;
+			arena->stats.nrequests_large += queued_nrequests;
+			arena->stats.lstats[binind - NBINS].nrequests += queued_nrequests;
 		} else {
 			uint64_t queued_nflushes = ACCESS_ONCE(cbin->queued_nflushes);
 			atomic_sub_uint64(&cbin->queued_nflushes, queued_nflushes);
-			bin->stats.nflushes += 1 + queued_nflushes;
-			bin->stats.nrequests += nrequests + queued_nrequests;
+			bin->stats.nflushes += queued_nflushes;
+			bin->stats.nrequests += queued_nrequests;
 		}
 	}
 }

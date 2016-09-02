@@ -418,6 +418,7 @@ arena_init_locked(tsdn_t *tsdn, unsigned ind)
 {
 	arena_t *arena;
 
+	assert(ind <= narenas_total_get());
 	if (ind > MALLOCX_ARENA_MAX)
 		return (NULL);
 	if (ind == narenas_total_get())
@@ -447,7 +448,6 @@ arena_init(tsdn_t *tsdn, unsigned ind)
 	malloc_mutex_lock(tsdn, &arenas_lock);
 	arena = arena_init_locked(tsdn, ind);
 	malloc_mutex_unlock(tsdn, &arenas_lock);
-
 	return (arena);
 }
 
@@ -646,8 +646,7 @@ arena_choose_hard(tsd_t *tsd, bool internal)
 
 				/* Initialize a new arena. */
 				choose[j] = first_null;
-				arena = arena_init_locked(tsd_tsdn(tsd),
-				    choose[j]);
+				arena = arena_init_locked(tsd_tsdn(tsd), choose[j]);
 				if (arena == NULL) {
 					malloc_mutex_unlock(tsd_tsdn(tsd),
 					    &arenas_lock);
@@ -1406,11 +1405,14 @@ malloc_init_hard_finish(tsdn_t *tsdn)
 		    ncpus);
 			return (true);
 		}
-		if (opt_perCPU_arena == per_phycpu_arena_enable && ncpus > 1) {
-			opt_narenas = ncpus / 2;
-		} else {
-			opt_narenas = ncpus;
+
+		if (opt_perCPU_arena == per_phycpu_arena_enable && ncpus % 2) {
+			malloc_printf("<jemalloc>: invalid configuration: per physical CPU arena"
+			    "with odd number (%u) of CPUs (no hyper threading?).\n", ncpus);
+			opt_perCPU_arena = percpu_arena_enable;
 		}
+
+		opt_narenas = percpu_arena_max_ind() + 1;
 	}
 
 	narenas_auto = opt_narenas;

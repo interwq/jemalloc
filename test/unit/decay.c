@@ -26,6 +26,7 @@ TEST_BEGIN(test_decay_ticks)
 	void *p;
 
 	test_skip_if(opt_purge != purge_mode_decay);
+	test_skip_if(opt_arena_purging_thread);
 
 	decay_ticker = decay_ticker_get(tsd_fetch(), 0);
 	assert_ptr_not_null(decay_ticker,
@@ -354,7 +355,7 @@ main(void)
 {
 
 	return (test(
-	    /* test_decay_ticks, */
+	    test_decay_ticks,
 	    test_decay_ticker,
 	    test_decay_nonmonotonic));
 }
