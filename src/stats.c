@@ -508,6 +508,9 @@ stats_print(void (*write_cb)(void *, const char *), void *cbopaque,
 		OPT_WRITE_SIZE_T(lg_chunk)
 		OPT_WRITE_CHAR_P(dss)
 		OPT_WRITE_UNSIGNED(narenas)
+		if (opt_perCPU_arena != percpu_arena_disable) {
+			OPT_WRITE_UNSIGNED(perCPU_arena);
+		}
 		OPT_WRITE_CHAR_P(purge)
 		if (opt_purge == purge_mode_ratio) {
 			OPT_WRITE_SSIZE_T_MUTABLE(lg_dirty_mult,
@@ -515,6 +518,7 @@ stats_print(void (*write_cb)(void *, const char *), void *cbopaque,
 		}
 		if (opt_purge == purge_mode_decay)
 			OPT_WRITE_SSIZE_T_MUTABLE(decay_time, arenas.decay_time)
+		OPT_WRITE_BOOL(arena_purging_thread)
 		OPT_WRITE_BOOL(stats_print)
 		OPT_WRITE_CHAR_P(junk)
 		OPT_WRITE_SIZE_T(quarantine)
@@ -628,16 +632,14 @@ stats_print(void (*write_cb)(void *, const char *), void *cbopaque,
 
 			CTL_GET("arenas.narenas", &narenas, unsigned);
 			{
+				VARIABLE_ARRAY(bool, initialized, narenas);
 				size_t isz;
-				unsigned i, n, ninitialized;
+				unsigned i, ninitialized;
 
-				n = narenas;
-				VARIABLE_ARRAY(bool, initialized, n);
-
-				isz = sizeof(bool) * n;
+				isz = sizeof(bool) * narenas;
 				xmallctl("arenas.initialized", initialized,
 				    &isz, NULL, 0);
-				for (i = ninitialized = 0; i < n; i++) {
+				for (i = ninitialized = 0; i < narenas; i++) {
 					if (initialized[i])
 						ninitialized++;
 				}
@@ -647,28 +649,26 @@ stats_print(void (*write_cb)(void *, const char *), void *cbopaque,
 					malloc_cprintf(write_cb, cbopaque,
 					    "\nMerged arenas stats:\n");
 					stats_arena_print(write_cb, cbopaque,
-					    n, bins, large, huge);
+					    narenas, bins, large, huge);
 				}
 			}
 		}
 
 		if (unmerged) {
-			unsigned narenas, n;
+			unsigned narenas;
 			/* Print stats for each arena. */
 
 			CTL_GET("arenas.narenas", &narenas, unsigned);
 			{
+				VARIABLE_ARRAY(bool, initialized, narenas);
 				size_t isz;
 				unsigned i;
 
-				n = narenas;
-				VARIABLE_ARRAY(bool, initialized, n);
-
-				isz = sizeof(bool) * n;
+				isz = sizeof(bool) * narenas;
 				xmallctl("arenas.initialized", initialized,
 				    &isz, NULL, 0);
 
-				for (i = 0; i < n; i++) {
+				for (i = 0; i < narenas; i++) {
 					if (initialized[i]) {
 						malloc_cprintf(write_cb,
 						    cbopaque,

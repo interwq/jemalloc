@@ -414,10 +414,9 @@ narenas_total_get(void)
 
 /* Create a new arena and insert it into the arenas array at index ind. */
 static arena_t *
-arena_init_locked(tsdn_t *tsdn, unsigned ind, bool *is_new_arena)
+arena_init_locked(tsdn_t *tsdn, unsigned ind)
 {
 	arena_t *arena;
-	*is_new_arena = false;
 
 	if (ind > MALLOCX_ARENA_MAX)
 		return (NULL);
@@ -434,7 +433,6 @@ arena_init_locked(tsdn_t *tsdn, unsigned ind, bool *is_new_arena)
 		return (arena);
 	}
 
-	*is_new_arena = true;
 	/* Actually initialize the arena. */
 	arena = arena_new(tsdn, ind);
 	arena_set(ind, arena);
@@ -444,11 +442,10 @@ arena_init_locked(tsdn_t *tsdn, unsigned ind, bool *is_new_arena)
 arena_t *
 arena_init(tsdn_t *tsdn, unsigned ind)
 {
-	bool is_new_arena;
 	arena_t *arena;
 
 	malloc_mutex_lock(tsdn, &arenas_lock);
-	arena = arena_init_locked(tsdn, ind, &is_new_arena);
+	arena = arena_init_locked(tsdn, ind);
 	malloc_mutex_unlock(tsdn, &arenas_lock);
 
 	return (arena);
@@ -577,7 +574,7 @@ arena_choose_hard(tsd_t *tsd, bool internal)
 {
 	arena_t *ret JEMALLOC_CC_SILENCE_INIT(NULL);
 
-	if (opt_perCPU_arena) {
+	if (opt_perCPU_arena != percpu_arena_disable) {
 		unsigned choose = percpu_arena_choose();
 		ret = arena_get(tsd_tsdn(tsd), choose, true);
 		assert(ret);
@@ -589,7 +586,6 @@ arena_choose_hard(tsd_t *tsd, bool internal)
 
 	if (narenas_auto > 1) {
 		unsigned i, j, choose[2], first_null;
-		bool is_new_arena[2] = {false};
 
 		/*
 		 * Determine binding for both non-internal and internal
@@ -651,7 +647,7 @@ arena_choose_hard(tsd_t *tsd, bool internal)
 				/* Initialize a new arena. */
 				choose[j] = first_null;
 				arena = arena_init_locked(tsd_tsdn(tsd),
-				    choose[j], &is_new_arena[j]);
+				    choose[j]);
 				if (arena == NULL) {
 					malloc_mutex_unlock(tsd_tsdn(tsd),
 					    &arenas_lock);
@@ -1404,16 +1400,16 @@ malloc_init_hard_finish(tsdn_t *tsdn)
 	}
 
 	assert(ncpus);
-	if (opt_perCPU_arena) {
+	if (opt_perCPU_arena != percpu_arena_disable) {
 		if (ncpus > MALLOCX_ARENA_MAX) {
 			malloc_printf("<jemalloc>: narenas w/ percpu arena beyond limit (%d)\n",
 		    ncpus);
 			return (true);
 		}
-		if (opt_perCPU_arena == 1 || ncpus == 1) {
-			opt_narenas = ncpus;
-		} else {
+		if (opt_perCPU_arena == per_phycpu_arena_enable && ncpus > 1) {
 			opt_narenas = ncpus / 2;
+		} else {
+			opt_narenas = ncpus;
 		}
 	}
 

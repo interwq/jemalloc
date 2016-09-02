@@ -186,7 +186,6 @@ tcache_get_hard(tsd_t *tsd)
 	arena = arena_choose(tsd, NULL);
 	if (unlikely(arena == NULL))
 		return (NULL);
-
 	return (tcache_create(tsd_tsdn(tsd), arena));
 }
 
@@ -267,7 +266,7 @@ tcache_destroy(tsd_t *tsd, tcache_t *tcache)
 		}
 	}
 
-	if (opt_perCPU_arena) {
+	if (opt_perCPU_arena != percpu_arena_disable) {
 		/* Associated arena could have changed during flush. */
 		arena = arena_choose(tsd, NULL);
 	}

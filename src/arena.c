@@ -4,11 +4,11 @@
 /******************************************************************************/
 /* Data. */
 
-bool	opt_acache = true;
+bool	opt_acache = false;
 /* Size of acache, relative to tcache. */
-unsigned	opt_acache_size_ratio = ACACHE_SIZE_RATIO_DEFAULT;
+unsigned opt_acache_size_ratio = ACACHE_SIZE_RATIO_DEFAULT;
 /* Bypass acache for small items to avoid fragmentation. */
-unsigned	opt_acache_bypass = ACACHE_BYPASS_IND_DEFAULT;
+unsigned opt_acache_bypass = ACACHE_BYPASS_IND_DEFAULT;
 
 unsigned	opt_perCPU_arena = PERCPU_ARENA_DEFAULT;
 bool	opt_arena_purging_thread = PURGE_THREAD_DEFAULT;
@@ -3552,7 +3552,7 @@ purge_thread_init(unsigned ind, arena_t **arena, tsdn_t **tsdn)
 {
 	tsd_t *tsd;
 
-	if (opt_perCPU_arena && ind < ncpus) {
+	if (opt_perCPU_arena != percpu_arena_disable && ind < ncpus) {
 		if (set_thread_affinity((int)ind)) {
 			malloc_printf("<jemalloc>: Purging thread affinity setting failure.\n");
 		}
@@ -3564,7 +3564,8 @@ purge_thread_init(unsigned ind, arena_t **arena, tsdn_t **tsdn)
 	assert(arena);
 }
 
-static void periodic_purge(arena_t *arena, tsdn_t *tsdn)
+static void
+periodic_purge(arena_t *arena, tsdn_t *tsdn)
 {
 
 	while (1) {

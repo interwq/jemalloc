@@ -35,8 +35,14 @@ typedef enum {
 /* Number of event ticks between time checks. */
 #define	DECAY_NTICKS_PER_UPDATE	1000
 
-/* 0: disable. 1: one arena per core. 2: one arena per physical CPU. */
-#define PERCPU_ARENA_DEFAULT 0
+typedef enum {
+	percpu_arena_disable = 0,
+	percpu_arena_enable = 1,
+	per_phycpu_arena_enable = 2, 	/* i.e. hyper threads share arena */
+
+	percpu_arena_mode_limit = 3
+} percpu_arena_mode_t;
+#define PERCPU_ARENA_DEFAULT percpu_arena_disable
 #define PURGE_THREAD_DEFAULT false
 /* # of seconds between purging. */
 #define PURGE_THREAD_INTERVAL 1

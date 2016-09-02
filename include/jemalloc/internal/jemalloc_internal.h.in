@@ -572,6 +572,7 @@ arena_tdata_t	*arena_tdata_get(tsd_t *tsd, unsigned ind,
 arena_t	*arena_get(tsdn_t *tsdn, unsigned ind, bool init_if_missing);
 ticker_t	*decay_ticker_get(tsd_t *tsd, unsigned ind);
 unsigned long malloc_getcpu(void);
+unsigned long percpu_arena_choose(void);
 void percpu_cache_arena_update(tsd_t *tsd, uint32_t cpu);
 
 #endif
@@ -811,11 +812,6 @@ malloc_getcpu(void)
 	/* TODO: this is Linux specific. Need equivalent on BSD & OSX. */
 	unsigned long cpuid = sched_getcpu();
 
-	if (opt_perCPU_arena > 1) {
-		if (cpuid >= ncpus/2)
-			cpuid -= ncpus/2;
-	}
-
 	return cpuid;
 }
 
@@ -823,12 +819,14 @@ malloc_getcpu(void)
 JEMALLOC_ALWAYS_INLINE unsigned long
 percpu_arena_choose(void)
 {
-	/* TODO: this is Linux specific. Need equivalent on BSD & OSX. */
 	unsigned long arena_ind = malloc_getcpu();
 
-	if (opt_perCPU_arena > 1) {
-		if (arena_ind >= ncpus/2)
-			arena_ind -= ncpus/2;
+	assert(opt_perCPU_arena != percpu_arena_disable);
+	if (opt_perCPU_arena == per_phycpu_arena_enable) {
+		if (arena_ind >= ncpus / 2) {
+			/* Hyper threads on the same CPU share arena. */
+			arena_ind -= ncpus / 2;
+		}
 	}
 
 	return arena_ind;
@@ -881,7 +879,7 @@ arena_choose_impl(tsd_t *tsd, arena_t *arena, bool internal)
 		ret = arena_choose_hard(tsd, internal);
 
 	assert(ret);
-	if (opt_perCPU_arena) {
+	if (opt_perCPU_arena != percpu_arena_disable) {
 		unsigned ind;
 
 		if (unlikely(ret->last_thd != tsd_tsdn(tsd))) {
