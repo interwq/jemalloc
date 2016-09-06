@@ -4,7 +4,7 @@
 /******************************************************************************/
 /* Data. */
 
-bool	opt_acache = true;
+bool	opt_acache = false;
 /* Size of acache, relative to tcache. */
 unsigned opt_acache_size_ratio = ACACHE_SIZE_RATIO_DEFAULT;
 /* Bypass acache for small items to avoid fragmentation. */

@@ -1381,11 +1381,8 @@ malloc_init_hard_recursible(void)
 }
 
 static bool
-malloc_init_hard_finish(tsdn_t *tsdn)
+malloc_init_narenas(void)
 {
-
-	if (malloc_mutex_boot())
-		return (true);
 
 	if (opt_narenas == 0) {
 		/*
@@ -1426,6 +1423,16 @@ malloc_init_hard_finish(tsdn_t *tsdn)
 	}
 	narenas_total_set(narenas_auto);
 
+	return (false);
+}
+
+static bool
+malloc_init_hard_finish(void)
+{
+
+	if (malloc_mutex_boot())
+		return (true);
+
 	malloc_init_state = malloc_init_initialized;
 	malloc_slow_flag_init();
 
@@ -1461,12 +1468,18 @@ malloc_init_hard(void)
 		return (true);
 	malloc_mutex_lock(tsd_tsdn(tsd), &init_lock);
 
+	/* Need this before prof_boot2 (for allocation). */
+	if (malloc_init_narenas()) {
+		malloc_mutex_unlock(tsd_tsdn(tsd), &init_lock);
+		return (true);
+	}
+
 	if (config_prof && prof_boot2(tsd_tsdn(tsd))) {
 		malloc_mutex_unlock(tsd_tsdn(tsd), &init_lock);
 		return (true);
 	}
 
-	if (malloc_init_hard_finish(tsd_tsdn(tsd))) {
+	if (malloc_init_hard_finish()) {
 		malloc_mutex_unlock(tsd_tsdn(tsd), &init_lock);
 		return (true);
 	}

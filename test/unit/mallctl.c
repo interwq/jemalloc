@@ -340,6 +340,8 @@ TEST_BEGIN(test_thread_arena)
 	unsigned arena_old, arena_new, narenas;
 	size_t sz = sizeof(unsigned);
 
+	test_skip_if(opt_perCPU_arena != percpu_arena_disable);
+
 	assert_d_eq(mallctl("arenas.narenas", &narenas, &sz, NULL, 0), 0,
 	    "Unexpected mallctl() failure");
 	assert_u_eq(narenas, opt_narenas, "Number of arenas incorrect");
