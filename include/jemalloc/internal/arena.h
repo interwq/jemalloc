@@ -1419,9 +1419,10 @@ JEMALLOC_ALWAYS_INLINE void
 arena_decay_tick(tsdn_t *tsdn, arena_t *arena)
 {
 
+#ifdef JEMALLOC_HAVE_PTHREAD
 	if (opt_arena_purging_thread)
 		return;
-
+#endif
 	arena_decay_ticks(tsdn, arena, 1);
 }
 

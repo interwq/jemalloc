@@ -1400,7 +1400,7 @@ malloc_init_narenas(void)
 	if (opt_perCPU_arena != percpu_arena_disable) {
 		if (malloc_getcpu() < 0) {
 			opt_perCPU_arena = percpu_arena_disable;
-			malloc_printf("<jemalloc>: perCPU arena getcpu() not available."
+			malloc_printf("<jemalloc>: perCPU arena getcpu() not available. "
 			    "Setting narenas to %u.\n", opt_narenas);
 		} else {
 			assert(ncpus);
@@ -1411,7 +1411,7 @@ malloc_init_narenas(void)
 			}
 
 			if (opt_perCPU_arena == per_phycpu_arena_enable && ncpus % 2) {
-				malloc_printf("<jemalloc>: invalid configuration: per physical CPU arena"
+				malloc_printf("<jemalloc>: invalid configuration: per physical CPU arena "
 											"with odd number (%u) of CPUs (no hyper threading?).\n", ncpus);
 				opt_perCPU_arena = percpu_arena_enable;
 			}
@@ -1500,8 +1500,14 @@ malloc_init_hard(void)
 		 * Need to finish init & unlock first before creating new purge
 		 * threads (pthread_create depends on malloc).
 		 */
+#ifdef JEMALLOC_HAVE_PTHREAD
 		if (a0_purge_thread_init())
 			return (true);
+#else
+		opt_arena_purging_thread = false;
+		malloc_printf("<jemalloc>: option purge_thread currently supports pthread "
+		    "only. Fallback to default tick triggered purge.\n");
+#endif
 	}
 
 	return (false);

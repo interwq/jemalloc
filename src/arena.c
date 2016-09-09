@@ -3539,6 +3539,7 @@ arena_nthreads_dec(arena_t *arena, bool internal)
 	atomic_sub_u(&arena->nthreads[internal], 1);
 }
 
+#ifdef JEMALLOC_HAVE_PTHREAD
 int set_thread_affinity(int cpu) {
 	cpu_set_t cpuset;
 	CPU_ZERO(&cpuset);
@@ -3561,7 +3562,7 @@ purge_thread_init(unsigned ind, arena_t **arena, tsdn_t **tsdn)
 	*tsdn = tsd_tsdn(tsd);
 
 	*arena = arenas[ind];
-	assert(arena);
+	assert(*arena);
 }
 
 static void
@@ -3597,10 +3598,10 @@ purge_thread_add(tsdn_t *tsdn, unsigned n_created)
 	arena_t *arena;
 	pthread_t thd;
 
+	n_new_thds = 0;
 	narenas = narenas_total_get();
 	assert(narenas > n_created);
-	n_needed = narenas_total_get() - n_created;
-	n_new_thds = 0;
+	n_needed = narenas - n_created;
 
 	for (i = 1; i < narenas; i++) {
 		arena = arena_get(tsdn, i, false);
@@ -3669,7 +3670,7 @@ a0_purge_thread_init(void)
 	while ((ret = pthread_create(&purge_thd, NULL, a0_purge_thread, NULL))) {
 		sched_yield();
 		if (++n_retry % 8 == 0) {
-			malloc_printf("<jemalloc>: a0 purge thread creation failed (%d)."
+			malloc_printf("<jemalloc>: a0 purge thread creation failed (%d). "
 			    "Retrying.\n", ret);
 		}
 		if (n_retry > max_retry) {
@@ -3680,6 +3681,7 @@ a0_purge_thread_init(void)
 
 	return (false);
 }
+#endif
 
 arena_t *
 arena_new(tsdn_t *tsdn, unsigned ind)
