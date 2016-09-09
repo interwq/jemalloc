@@ -571,9 +571,9 @@ arena_tdata_t	*arena_tdata_get(tsd_t *tsd, unsigned ind,
     bool refresh_if_missing);
 arena_t	*arena_get(tsdn_t *tsdn, unsigned ind, bool init_if_missing);
 ticker_t	*decay_ticker_get(tsd_t *tsd, unsigned ind);
-unsigned long malloc_getcpu(void);
-unsigned long percpu_arena_choose(void);
-unsigned long percpu_arena_max_ind(void);
+int malloc_getcpu(void);
+unsigned percpu_arena_choose(void);
+unsigned percpu_arena_max_ind(void);
 void percpu_cache_arena_update(tsd_t *tsd, uint32_t cpu);
 
 #endif
@@ -818,14 +818,14 @@ malloc_getcpu(void)
 }
 
 /* Choose arena based on cpuid. */
-JEMALLOC_ALWAYS_INLINE unsigned long
+JEMALLOC_ALWAYS_INLINE unsigned
 percpu_arena_choose(void)
 {
-	int arena_ind, cpuid;
+	unsigned arena_ind, cpuid;
 
-	cpuid = malloc_getcpu();
-	assert(cpuid >= 0);
+	assert(malloc_getcpu() >= 0);
 	assert(opt_perCPU_arena != percpu_arena_disable);
+	cpuid = malloc_getcpu();
 	if (opt_perCPU_arena == per_phycpu_arena_enable &&
 	    cpuid >= ncpus / 2) {
 		/* Hyper threads on the same CPU share arena. */
@@ -838,7 +838,7 @@ percpu_arena_choose(void)
 }
 
 /* arenas[0...max_ind] is the automatic range. */
-JEMALLOC_ALWAYS_INLINE unsigned long
+JEMALLOC_ALWAYS_INLINE unsigned
 percpu_arena_max_ind(void)
 {
 
