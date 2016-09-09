@@ -1397,19 +1397,26 @@ malloc_init_narenas(void)
 
 	assert(ncpus);
 	if (opt_perCPU_arena != percpu_arena_disable) {
-		if (ncpus > MALLOCX_ARENA_MAX) {
-			malloc_printf("<jemalloc>: narenas w/ percpu arena beyond limit (%d)\n",
-		    ncpus);
-			return (true);
-		}
+		if (malloc_getcpu() < 0) {
+			opt_perCPU_arena = percpu_arena_disable;
+			malloc_printf("<jemalloc>: getcpu() not available."
+			    "Setting narenas to %u.\n", opt_narenas);
+		} else {
+			assert(ncpus);
+			if (ncpus > MALLOCX_ARENA_MAX) {
+				malloc_printf("<jemalloc>: narenas w/ percpu arena beyond limit (%d)\n",
+											ncpus);
+				return (true);
+			}
 
-		if (opt_perCPU_arena == per_phycpu_arena_enable && ncpus % 2) {
-			malloc_printf("<jemalloc>: invalid configuration: per physical CPU arena"
-			    "with odd number (%u) of CPUs (no hyper threading?).\n", ncpus);
-			opt_perCPU_arena = percpu_arena_enable;
-		}
+			if (opt_perCPU_arena == per_phycpu_arena_enable && ncpus % 2) {
+				malloc_printf("<jemalloc>: invalid configuration: per physical CPU arena"
+											"with odd number (%u) of CPUs (no hyper threading?).\n", ncpus);
+				opt_perCPU_arena = percpu_arena_enable;
+			}
 
-		opt_narenas = percpu_arena_max_ind() + 1;
+			opt_narenas = percpu_arena_max_ind() + 1;
+		}
 	}
 
 	narenas_auto = opt_narenas;

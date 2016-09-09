@@ -807,13 +807,16 @@ sa2u(size_t size, size_t alignment)
 	return (usize);
 }
 
-JEMALLOC_ALWAYS_INLINE unsigned long
+JEMALLOC_ALWAYS_INLINE int
 malloc_getcpu(void)
 {
-	/* TODO: this is Linux specific. Need equivalent on BSD & OSX. */
-	unsigned long cpuid = sched_getcpu();
+#ifdef JEMALLOC_HAVE_SCHED_GETCPU
+	int cpuid = sched_getcpu();
 
 	return cpuid;
+#else
+	return -1;
+#endif
 }
 
 /* Choose arena based on cpuid. */

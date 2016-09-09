@@ -1257,6 +1257,7 @@ dnl ============================================================================
 dnl Configure pthreads.
 
 if test "x$abi" != "xpecoff" ; then
+  AC_DEFINE([JEMALLOC_HAVE_PTHREAD], [ ])
   AC_CHECK_HEADERS([pthread.h], , [AC_MSG_ERROR([pthread.h is missing])])
   dnl Some systems may embed pthreads functionality in libc; check for libpthread
   dnl first, but try libc too before failing.
@@ -1277,6 +1278,15 @@ AC_CHECK_FUNC([secure_getenv],
              )
 if test "x$have_secure_getenv" = "x1" ; then
   AC_DEFINE([JEMALLOC_HAVE_SECURE_GETENV], [ ])
+fi
+
+dnl Check if the GNU-specific sched_getcpu function exists.
+AC_CHECK_FUNC([sched_getcpu],
+              [have_sched_getcpu="1"],
+              [have_sched_getcpu="0"]
+             )
+if test "x$have_sched_getcpu" = "x1" ; then
+  AC_DEFINE([JEMALLOC_HAVE_SCHED_GETCPU], [ ])
 fi
 
 dnl Check if the Solaris/BSD issetugid function exists.
