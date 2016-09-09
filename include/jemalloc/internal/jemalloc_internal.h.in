@@ -811,9 +811,7 @@ JEMALLOC_ALWAYS_INLINE int
 malloc_getcpu(void)
 {
 #ifdef JEMALLOC_HAVE_SCHED_GETCPU
-	int cpuid = sched_getcpu();
-
-	return cpuid;
+	return sched_getcpu();
 #else
 	return -1;
 #endif
@@ -823,9 +821,10 @@ malloc_getcpu(void)
 JEMALLOC_ALWAYS_INLINE unsigned long
 percpu_arena_choose(void)
 {
-	unsigned long arena_ind, cpuid;
+	int arena_ind, cpuid;
 
 	cpuid = malloc_getcpu();
+	assert(cpuid >= 0);
 	assert(opt_perCPU_arena != percpu_arena_disable);
 	if (opt_perCPU_arena == per_phycpu_arena_enable &&
 	    cpuid >= ncpus / 2) {
@@ -902,6 +901,7 @@ arena_choose_impl(tsd_t *tsd, arena_t *arena, bool internal)
 		ret = arena_choose_hard(tsd, internal);
 
 	assert(ret);
+#ifdef JEMALLOC_HAVE_SCHED_GETCPU
 	if (opt_perCPU_arena != percpu_arena_disable
 	    && unlikely(ret->last_thd != tsd_tsdn(tsd))) {
 		unsigned ind = percpu_arena_choose();
@@ -911,6 +911,7 @@ arena_choose_impl(tsd_t *tsd, arena_t *arena, bool internal)
 		}
 		ret->last_thd = tsd_tsdn(tsd);
 	}
+#endif
 
 	return (ret);
 }

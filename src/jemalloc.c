@@ -574,6 +574,7 @@ arena_choose_hard(tsd_t *tsd, bool internal)
 {
 	arena_t *ret JEMALLOC_CC_SILENCE_INIT(NULL);
 
+#ifdef JEMALLOC_HAVE_SCHED_GETCPU
 	if (opt_perCPU_arena != percpu_arena_disable) {
 		unsigned choose = percpu_arena_choose();
 		ret = arena_get(tsd_tsdn(tsd), choose, true);
@@ -583,7 +584,7 @@ arena_choose_hard(tsd_t *tsd, bool internal)
 
 		return ret;
 	}
-
+#endif
 	if (narenas_auto > 1) {
 		unsigned i, j, choose[2], first_null;
 
@@ -1399,7 +1400,7 @@ malloc_init_narenas(void)
 	if (opt_perCPU_arena != percpu_arena_disable) {
 		if (malloc_getcpu() < 0) {
 			opt_perCPU_arena = percpu_arena_disable;
-			malloc_printf("<jemalloc>: getcpu() not available."
+			malloc_printf("<jemalloc>: perCPU arena getcpu() not available."
 			    "Setting narenas to %u.\n", opt_narenas);
 		} else {
 			assert(ncpus);
