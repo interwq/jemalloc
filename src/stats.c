@@ -508,7 +508,7 @@ stats_print(void (*write_cb)(void *, const char *), void *cbopaque,
 		OPT_WRITE_SIZE_T(lg_chunk)
 		OPT_WRITE_CHAR_P(dss)
 		OPT_WRITE_UNSIGNED(narenas)
-		if (opt_perCPU_arena != percpu_arena_disable) {
+		if (opt_percpu_arena != percpu_arena_disable) {
 			OPT_WRITE_UNSIGNED(perCPU_arena);
 		}
 		OPT_WRITE_CHAR_P(purge)

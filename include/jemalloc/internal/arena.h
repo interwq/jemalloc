@@ -573,7 +573,7 @@ extern bool	opt_acache;
 extern unsigned opt_acache_size_ratio;
 extern unsigned opt_acache_bypass;
 
-extern unsigned opt_perCPU_arena;
+extern unsigned opt_percpu_arena;
 extern bool	opt_arena_purging_thread;
 
 extern purge_mode_t	opt_purge;

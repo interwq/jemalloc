@@ -572,9 +572,11 @@ arena_tdata_t	*arena_tdata_get(tsd_t *tsd, unsigned ind,
 arena_t	*arena_get(tsdn_t *tsdn, unsigned ind, bool init_if_missing);
 ticker_t	*decay_ticker_get(tsd_t *tsd, unsigned ind);
 int malloc_getcpu(void);
+#if defined(JEMALLOC_HAVE_SCHED_GETCPU)
 unsigned percpu_arena_choose(void);
 unsigned percpu_arena_max_ind(void);
-void percpu_cache_arena_update(tsd_t *tsd, uint32_t cpu);
+void percpu_tcache_arena_update(tsd_t *tsd, unsigned cpu);
+#endif
 
 #endif
 
@@ -810,13 +812,15 @@ sa2u(size_t size, size_t alignment)
 JEMALLOC_ALWAYS_INLINE int
 malloc_getcpu(void)
 {
-#ifdef JEMALLOC_HAVE_SCHED_GETCPU
+#if defined(JEMALLOC_HAVE_SCHED_GETCPU)
 	return sched_getcpu();
 #else
+	/* Return error code to detect misconfig. */
 	return -1;
 #endif
 }
 
+#if defined(JEMALLOC_HAVE_SCHED_GETCPU)
 /* Choose arena based on cpuid. */
 JEMALLOC_ALWAYS_INLINE unsigned
 percpu_arena_choose(void)
@@ -824,9 +828,9 @@ percpu_arena_choose(void)
 	unsigned arena_ind, cpuid;
 
 	assert(malloc_getcpu() >= 0);
-	assert(opt_perCPU_arena != percpu_arena_disable);
+	assert(opt_percpu_arena != percpu_arena_disable);
 	cpuid = malloc_getcpu();
-	if (opt_perCPU_arena == per_phycpu_arena_enable &&
+	if (opt_percpu_arena == per_phycpu_arena_enable &&
 	    cpuid >= ncpus / 2) {
 		/* Hyper threads on the same CPU share arena. */
 		arena_ind = cpuid - ncpus / 2;
@@ -842,8 +846,8 @@ JEMALLOC_ALWAYS_INLINE unsigned
 percpu_arena_max_ind(void)
 {
 
-	assert(opt_perCPU_arena != percpu_arena_disable);
-	if (opt_perCPU_arena == per_phycpu_arena_enable && ncpus > 1) {
+	assert(opt_percpu_arena != percpu_arena_disable);
+	if (opt_percpu_arena == per_phycpu_arena_enable && ncpus > 1) {
 		if (ncpus % 2) {
 			/* This likely means a misconfig. */
 			return ncpus / 2;
@@ -858,7 +862,7 @@ JEMALLOC_ALWAYS_INLINE arena_t	*
 arena_get(tsdn_t *tsdn, unsigned ind, bool init_if_missing);
 
 JEMALLOC_ALWAYS_INLINE void
-percpu_cache_arena_update(tsd_t *tsd, uint32_t cpu)
+percpu_tcache_arena_update(tsd_t *tsd, unsigned cpu)
 {
 	arena_t *oldarena;
 	unsigned oldind;
@@ -886,6 +890,7 @@ percpu_cache_arena_update(tsd_t *tsd, uint32_t cpu)
 		}
 	}
 }
+#endif /* JEMALLOC_HAVE_SCHED_GETCPU */
 
 /* Choose an arena based on a per-thread value. */
 JEMALLOC_INLINE arena_t *
@@ -901,12 +906,12 @@ arena_choose_impl(tsd_t *tsd, arena_t *arena, bool internal)
 		ret = arena_choose_hard(tsd, internal);
 
 	assert(ret);
-#ifdef JEMALLOC_HAVE_SCHED_GETCPU
-	if (opt_perCPU_arena != percpu_arena_disable
+#if defined(JEMALLOC_HAVE_SCHED_GETCPU)
+	if (opt_percpu_arena != percpu_arena_disable
 	    && unlikely(ret->last_thd != tsd_tsdn(tsd))) {
 		unsigned ind = percpu_arena_choose();
 		if (ret->ind != ind) {
-			percpu_cache_arena_update(tsd, ind);
+			percpu_tcache_arena_update(tsd, ind);
 			ret = tsd_arena_get(tsd);
 		}
 		ret->last_thd = tsd_tsdn(tsd);

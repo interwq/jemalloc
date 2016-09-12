@@ -574,8 +574,8 @@ arena_choose_hard(tsd_t *tsd, bool internal)
 {
 	arena_t *ret JEMALLOC_CC_SILENCE_INIT(NULL);
 
-#ifdef JEMALLOC_HAVE_SCHED_GETCPU
-	if (opt_perCPU_arena != percpu_arena_disable) {
+#if defined(JEMALLOC_HAVE_SCHED_GETCPU)
+	if (opt_percpu_arena != percpu_arena_disable) {
 		unsigned choose = percpu_arena_choose();
 		ret = arena_get(tsd_tsdn(tsd), choose, true);
 		assert(ret);
@@ -1231,7 +1231,7 @@ malloc_conf_init(void)
 				    "acache_bypass", 0, NBINS, false);
 			}
 
-			CONF_HANDLE_UNSIGNED(opt_perCPU_arena, "percpu_arena", 0, 2, false);
+			CONF_HANDLE_UNSIGNED(opt_percpu_arena, "percpu_arena", 0, 2, false);
 			CONF_HANDLE_BOOL(opt_arena_purging_thread, "purge_thread", true);
 
 			if (config_prof) {
@@ -1397,26 +1397,28 @@ malloc_init_narenas(void)
 	}
 
 	assert(ncpus);
-	if (opt_perCPU_arena != percpu_arena_disable) {
+	if (opt_percpu_arena != percpu_arena_disable) {
 		if (malloc_getcpu() < 0) {
-			opt_perCPU_arena = percpu_arena_disable;
+			opt_percpu_arena = percpu_arena_disable;
 			malloc_printf("<jemalloc>: perCPU arena getcpu() not available. "
 			    "Setting narenas to %u.\n", opt_narenas);
 		} else {
 			assert(ncpus);
+#if defined(JEMALLOC_HAVE_SCHED_GETCPU)
 			if (ncpus > MALLOCX_ARENA_MAX) {
 				malloc_printf("<jemalloc>: narenas w/ percpu arena beyond limit (%d)\n",
 											ncpus);
 				return (true);
 			}
 
-			if (opt_perCPU_arena == per_phycpu_arena_enable && ncpus % 2) {
+			if (opt_percpu_arena == per_phycpu_arena_enable && ncpus % 2) {
 				malloc_printf("<jemalloc>: invalid configuration: per physical CPU arena "
 											"with odd number (%u) of CPUs (no hyper threading?).\n", ncpus);
-				opt_perCPU_arena = percpu_arena_enable;
+				opt_percpu_arena = percpu_arena_enable;
 			}
 
 			opt_narenas = percpu_arena_max_ind() + 1;
+#endif
 		}
 	}
 

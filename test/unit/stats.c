@@ -301,7 +301,7 @@ TEST_BEGIN(test_stats_arenas_bins)
 		    "nmalloc should be greater than zero");
 		assert_u64_ge(nmalloc, ndalloc,
 		    "nmalloc should be at least as large as ndalloc");
-		if (!opt_acache && opt_perCPU_arena == percpu_arena_disable) {
+		if (!opt_acache && opt_percpu_arena == percpu_arena_disable) {
 			assert_u64_gt(nrequests, 0,
 		      "nrequests should be greater than zero");
 		}

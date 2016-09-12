@@ -266,7 +266,7 @@ tcache_destroy(tsd_t *tsd, tcache_t *tcache)
 		}
 	}
 
-	if (opt_perCPU_arena != percpu_arena_disable) {
+	if (opt_percpu_arena != percpu_arena_disable) {
 		/* Associated arena could have changed during flush. */
 		arena = arena_choose(tsd, NULL);
 	}

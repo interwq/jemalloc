@@ -10,7 +10,7 @@ unsigned opt_acache_size_ratio = ACACHE_SIZE_RATIO_DEFAULT;
 /* Bypass acache for small items to avoid fragmentation. */
 unsigned opt_acache_bypass = ACACHE_BYPASS_IND_DEFAULT;
 
-unsigned	opt_perCPU_arena = PERCPU_ARENA_DEFAULT;
+unsigned	opt_percpu_arena = PERCPU_ARENA_DEFAULT;
 bool	opt_arena_purging_thread = PURGE_THREAD_DEFAULT;
 
 purge_mode_t	opt_purge = PURGE_DEFAULT;
@@ -3553,7 +3553,7 @@ purge_thread_init(unsigned ind, arena_t **arena, tsdn_t **tsdn)
 {
 	tsd_t *tsd;
 
-	if (opt_perCPU_arena != percpu_arena_disable && ind < ncpus) {
+	if (opt_percpu_arena != percpu_arena_disable && ind < ncpus) {
 		if (set_thread_affinity((int)ind)) {
 			malloc_printf("<jemalloc>: Purging thread affinity setting failure.\n");
 		}

@@ -94,7 +94,7 @@ CTL_PROTO(opt_acache_size_ratio)
 CTL_PROTO(opt_dss)
 CTL_PROTO(opt_lg_chunk)
 CTL_PROTO(opt_narenas)
-CTL_PROTO(opt_perCPU_arena)
+CTL_PROTO(opt_percpu_arena)
 CTL_PROTO(opt_purge)
 CTL_PROTO(opt_lg_dirty_mult)
 CTL_PROTO(opt_decay_time)
@@ -275,7 +275,7 @@ static const ctl_named_node_t opt_node[] = {
 	{NAME("dss"),		CTL(opt_dss)},
 	{NAME("lg_chunk"),	CTL(opt_lg_chunk)},
 	{NAME("narenas"),	CTL(opt_narenas)},
-	{NAME("perCPU_arena"),	CTL(opt_perCPU_arena)},
+	{NAME("perCPU_arena"),	CTL(opt_percpu_arena)},
 	{NAME("purge"),		CTL(opt_purge)},
 	{NAME("lg_dirty_mult"),	CTL(opt_lg_dirty_mult)},
 	{NAME("decay_time"),	CTL(opt_decay_time)},
@@ -1287,7 +1287,7 @@ CTL_RO_NL_GEN(opt_abort, opt_abort, bool)
 CTL_RO_NL_GEN(opt_dss, opt_dss, const char *)
 CTL_RO_NL_GEN(opt_lg_chunk, opt_lg_chunk, size_t)
 CTL_RO_NL_GEN(opt_narenas, opt_narenas, unsigned)
-CTL_RO_NL_GEN(opt_perCPU_arena, opt_perCPU_arena, unsigned)
+CTL_RO_NL_GEN(opt_percpu_arena, opt_percpu_arena, unsigned)
 CTL_RO_NL_GEN(opt_purge, purge_mode_names[opt_purge], const char *)
 CTL_RO_NL_GEN(opt_lg_dirty_mult, opt_lg_dirty_mult, ssize_t)
 CTL_RO_NL_GEN(opt_decay_time, opt_decay_time, ssize_t)
@@ -1342,7 +1342,8 @@ thread_arena_ctl(tsd_t *tsd, const size_t *mib, size_t miblen, void *oldp,
 			goto label_return;
 		}
 
-		if (opt_perCPU_arena != percpu_arena_disable) {
+#if defined(JEMALLOC_HAVE_SCHED_GETCPU)
+		if (opt_percpu_arena != percpu_arena_disable) {
 			if (newind <= percpu_arena_max_ind()) {
 				/*
 				 * If perCPU arena is enabled, thread_arena control is not allowed for
@@ -1352,6 +1353,7 @@ thread_arena_ctl(tsd_t *tsd, const size_t *mib, size_t miblen, void *oldp,
 				goto label_return;
 			}
 		}
+#endif
 
 		/* Initialize arena if necessary. */
 		newarena = arena_get(tsd_tsdn(tsd), newind, true);
