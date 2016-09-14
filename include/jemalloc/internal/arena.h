@@ -302,14 +302,17 @@ struct arena_bin_s {
 	malloc_bin_stats_t	stats;
 };
 
+#define ACACHE_SIZE_RATIO_DEFAULT 4 /* default acache size = (4 * tcache) */
+#define ACACHE_BYPASS_IND_DEFAULT 16
+
 #define ACACHE_EPOCH_OFF 32
 #define ACACHE_EPOCH_INC ((uint64_t)1 << ACACHE_EPOCH_OFF)
 #define ACACHE_LOCKBIT   ((uint64_t)1 << 31)
 #define ACACHE_NCACHED_BITS 15
 #define ACACHE_NCACHED_MASK (((uint64_t)1 << ACACHE_NCACHED_BITS) - 1)
+#define ACACHE_CAS_FAIL_RETRY_MAX 8
 
-#define ACACHE_SIZE_RATIO_DEFAULT 4 /* default acache size = (4 * tcache) */
-#define ACACHE_BYPASS_IND_DEFAULT 16
+#define SPINWAIT_RETRY { CPU_SPINWAIT; goto label_retry; }
 
 struct arena_cache_bin_info_s {
 	unsigned	ncached_max;	/* Upper limit on ncached. */
@@ -1689,18 +1692,23 @@ cbin_lock_and_get_info(arena_cache_bin_t *cbin, acache_state_t *state,
     size_t *ncached, size_t *low_water)
 {
 	bool bin_locked, cas_fail;
+	unsigned retry = 0;
 label_retry:
 	*state = cbin_state_get(cbin, ncached, low_water, &bin_locked);
 	if (bin_locked) {
-		return true;
+		return (true);
 	}
 
 	/* Try locking the cache bin */
 	cas_fail = cbin_lock(cbin, state);
-	if (unlikely(cas_fail))
-		goto label_retry;
+	if (unlikely(cas_fail)) {
+		if (retry++ == ACACHE_CAS_FAIL_RETRY_MAX) {
+			return (true);
+		}
+		SPINWAIT_RETRY;
+	}
 
-	return false;
+	return (false);
 }
 
 JEMALLOC_ALWAYS_INLINE void
@@ -1735,12 +1743,14 @@ cbin_alloc_to_tbin(arena_cache_bin_t *cbin, tcache_bin_t *tbin,
     unsigned n_alloc)
 {
 	acache_state_t state, new_state;
-	size_t ncached, low_water;
+	size_t ncached, low_water, retry;
 	bool cas_fail, locked;
+
+	retry = 0;
 label_retry:
 	state = cbin_state_get(cbin, &ncached, &low_water, &locked);
 	if (locked || (ncached == 0))
-		return 0;
+		return (0);
 
 	if (n_alloc > ncached)
 		n_alloc = ncached;
@@ -1762,12 +1772,15 @@ label_retry:
 	if (unlikely(cas_fail)) {
 		assert((ACCESS_ONCE(cbin->data) >> ACACHE_EPOCH_OFF) !=
 		    (state >> ACACHE_EPOCH_OFF));
-		goto label_retry;
+		if (retry++ == ACACHE_CAS_FAIL_RETRY_MAX) {
+			return (0);
+		}
+		SPINWAIT_RETRY;
 	}
 	assert(tbin->avail[-(int)n_alloc] && tbin->avail[-1]);
 	tbin->ncached = n_alloc;
 
-	return n_alloc;
+	return (n_alloc);
 }
 
 /*
@@ -1778,13 +1791,15 @@ JEMALLOC_ALWAYS_INLINE void *
 cbin_alloc(arena_cache_bin_t *cbin)
 {
 	acache_state_t state, new_state;
-	size_t ncached, low_water;
+	size_t ncached, low_water, retry;
 	bool cas_fail, locked;
 	void *ret;
+
+	retry = 0;
 label_retry:
 	state = cbin_state_get(cbin, &ncached, &low_water, &locked);
 	if (locked || (ncached == 0))
-		return 0;
+		return (0);
 
 	ret = cbin->avail[ncached - 1];
 	/* Update state and low_water if necessary. */
@@ -1798,10 +1813,13 @@ label_retry:
 	if (unlikely(cas_fail)) {
 		assert((ACCESS_ONCE(cbin->data) >> ACACHE_EPOCH_OFF) !=
 		    (state >> ACACHE_EPOCH_OFF));
-		goto label_retry;
+		if (retry++ == ACACHE_CAS_FAIL_RETRY_MAX) {
+			return (0);
+		}
+		SPINWAIT_RETRY;
 	}
 
-	return ret;
+	return (ret);
 }
 
 /* Allocated a single item. Use cached memory if available. */
