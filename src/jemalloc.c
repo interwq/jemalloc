@@ -60,6 +60,7 @@ static malloc_mutex_t	arenas_lock;
 JEMALLOC_ALIGNED(CACHELINE)
 arena_t			*arenas[MALLOCX_ARENA_MAX];
 static unsigned		narenas_total; /* Use narenas_total_*(). */
+static unsigned		narenas_initialized; /* Use narenas_initialized_*(). */
 static arena_t		*a0; /* arenas[0]; read-only after initialization. */
 unsigned		narenas_auto; /* Read-only after initialization. */
 
@@ -412,6 +413,20 @@ narenas_total_get(void)
 	return (atomic_read_u(&narenas_total));
 }
 
+static void
+narenas_initialized_inc(void)
+{
+
+	atomic_add_u(&narenas_initialized, 1);
+}
+
+unsigned
+narenas_initialized_get(void)
+{
+
+	return (atomic_read_u(&narenas_initialized));
+}
+
 /* Create a new arena and insert it into the arenas array at index ind. */
 static arena_t *
 arena_init_locked(tsdn_t *tsdn, unsigned ind)
@@ -437,6 +452,8 @@ arena_init_locked(tsdn_t *tsdn, unsigned ind)
 	/* Actually initialize the arena. */
 	arena = arena_new(tsdn, ind);
 	arena_set(ind, arena);
+	narenas_initialized_inc();
+
 	return (arena);
 }
 
@@ -1232,7 +1249,7 @@ malloc_conf_init(void)
 			}
 
 			CONF_HANDLE_UNSIGNED(opt_percpu_arena, "percpu_arena", 0, 2, false);
-			CONF_HANDLE_BOOL(opt_arena_purging_thread, "purge_thread", true);
+			CONF_HANDLE_BOOL(opt_arena_purging_thread, "arena_purging_thread", true);
 
 			if (config_prof) {
 				CONF_HANDLE_BOOL(opt_prof, "prof", true)
@@ -1402,18 +1419,24 @@ malloc_init_narenas(void)
 			opt_percpu_arena = percpu_arena_disable;
 			malloc_printf("<jemalloc>: perCPU arena getcpu() not available. "
 			    "Setting narenas to %u.\n", opt_narenas);
+			if (opt_abort)
+				abort();
 		} else {
 			assert(ncpus);
 #if defined(JEMALLOC_HAVE_SCHED_GETCPU)
 			if (ncpus > MALLOCX_ARENA_MAX) {
 				malloc_printf("<jemalloc>: narenas w/ percpu arena beyond limit (%d)\n",
-											ncpus);
+				    ncpus);
+				if (opt_abort)
+					abort();
 				return (true);
 			}
 
 			if (opt_percpu_arena == per_phycpu_arena_enable && ncpus % 2) {
 				malloc_printf("<jemalloc>: invalid configuration: per physical CPU arena "
 											"with odd number (%u) of CPUs (no hyper threading?).\n", ncpus);
+				if (opt_abort)
+					abort();
 				opt_percpu_arena = percpu_arena_enable;
 			}
 
@@ -1503,12 +1526,15 @@ malloc_init_hard(void)
 		 * threads (pthread_create depends on malloc).
 		 */
 #ifdef JEMALLOC_HAVE_PTHREAD
-		if (a0_purge_thread_init())
+		if (a0_purge_thread_create())
 			return (true);
 #else
 		opt_arena_purging_thread = false;
 		malloc_printf("<jemalloc>: option purge_thread currently supports pthread "
-		    "only. Fallback to default tick triggered purge.\n");
+		    "only. \n");
+		if (opt_abort)
+			abort();
+		malloc_printf("<jemalloc>: Fall back to default tick triggered purge.");
 #endif
 	}
 

@@ -480,6 +480,7 @@ void	*bootstrap_malloc(size_t size);
 void	*bootstrap_calloc(size_t num, size_t size);
 void	bootstrap_free(void *ptr);
 unsigned	narenas_total_get(void);
+unsigned	narenas_initialized_get(void);
 arena_t	*arena_init(tsdn_t *tsdn, unsigned ind);
 arena_tdata_t	*arena_tdata_get_hard(tsd_t *tsd, unsigned ind);
 arena_t	*arena_choose_hard(tsd_t *tsd, bool internal);

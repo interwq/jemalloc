@@ -3540,12 +3540,14 @@ arena_nthreads_dec(arena_t *arena, bool internal)
 }
 
 #ifdef JEMALLOC_HAVE_PTHREAD
-int set_thread_affinity(int cpu) {
+int
+set_thread_affinity(int cpu)
+{
 	cpu_set_t cpuset;
 	CPU_ZERO(&cpuset);
 	CPU_SET(cpu, &cpuset);
 
-	return pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+	return (pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset));
 }
 
 static void
@@ -3556,6 +3558,8 @@ purge_thread_init(unsigned ind, arena_t **arena, tsdn_t **tsdn)
 	if (opt_percpu_arena != percpu_arena_disable && ind < ncpus) {
 		if (set_thread_affinity((int)ind)) {
 			malloc_printf("<jemalloc>: Purging thread affinity setting failure.\n");
+			if (opt_abort)
+				abort();
 		}
 	}
 	tsd = tsd_fetch();
@@ -3565,31 +3569,8 @@ purge_thread_init(unsigned ind, arena_t **arena, tsdn_t **tsdn)
 	assert(*arena);
 }
 
-static void
-periodic_purge(arena_t *arena, tsdn_t *tsdn)
-{
-
-	while (1) {
-		sleep(PURGE_THREAD_INTERVAL);
-		arena_purge(tsdn, arena, false);
-	}
-}
-
 void *
-arena_purge_thread(void *arena_ind)
-{
-	arena_t *arena;
-	tsdn_t *tsdn;
-	unsigned ind = (unsigned)(uintptr_t)arena_ind;
-
-	assert(ind && ind < narenas_total_get());
-	purge_thread_init(ind, &arena, &tsdn);
-	periodic_purge(arena, tsdn);
-
-	not_reached();
-	return (NULL);
-}
-
+arena_purge_thread(void *arena_ind);
 
 JEMALLOC_INLINE_C unsigned
 purge_thread_add(tsdn_t *tsdn, unsigned n_created)
@@ -3613,50 +3594,59 @@ purge_thread_add(tsdn_t *tsdn, unsigned n_created)
 			if (!pthread_create(&thd, NULL, arena_purge_thread,
 			    (void *)(uint64_t)arena->ind)) {
 				arena->purge_thread = thd;
-				/* If for any reason the thread creation failed, retry next time. */
 				n_new_thds++;
 			}
 			if (--n_needed == 0) break;
 		}
 	}
-
-	return n_new_thds;
+	/* If for any reason thread creation failed, we'll retry next time. */
+	return (n_new_thds);
 }
 
-/*
- * In addition to purging, a0 purge thread is also responsible for creating new
- * purge threads for other arenas.
- */
 static void
-a0_periodic_purge(arena_t *arena, tsdn_t *tsdn)
+periodic_purge(arena_t *arena, tsdn_t *tsdn)
 {
-	/* Current thread is a0 purge thread. */
-	static unsigned n_purge_threads = 1;
 
-	while (1) {
-		if (n_purge_threads != narenas_total_get()) {
-			n_purge_threads += purge_thread_add(tsdn, n_purge_threads);
+	if (arena->ind == 0) {
+		/*
+		 * In addition to purging, a0 purge thread is also responsible for
+		 * creating purge threads for new arenas.
+		 */
+		static unsigned n_purge_threads = 1;
+
+		while (true) {
+			if (n_purge_threads != narenas_initialized_get()) {
+				n_purge_threads += purge_thread_add(tsdn, n_purge_threads);
+				assert(n_purge_threads <= narenas_initialized_get());
+			}
+			sleep(PURGE_THREAD_INTERVAL);
+			arena_purge(tsdn, arena, false);
 		}
-		sleep(PURGE_THREAD_INTERVAL);
-		arena_purge(tsdn, arena, false);
+	} else {
+		while (true) {
+			sleep(PURGE_THREAD_INTERVAL);
+			arena_purge(tsdn, arena, false);
+		}
 	}
 }
 
-static void *
-a0_purge_thread(UNUSED void *ind)
+void *
+arena_purge_thread(void *arena_ind)
 {
 	arena_t *arena;
 	tsdn_t *tsdn;
+	unsigned ind = (unsigned)(uintptr_t)arena_ind;
 
-	purge_thread_init(0, &arena, &tsdn);
-	a0_periodic_purge(arena, tsdn);
+	assert(ind < narenas_total_get());
+	purge_thread_init(ind, &arena, &tsdn);
+	periodic_purge(arena, tsdn);
 
 	not_reached();
 	return (NULL);
 }
 
 bool
-a0_purge_thread_init(void)
+a0_purge_thread_create(void)
 {
 	pthread_t purge_thd;
 	arena_t *a0;
@@ -3667,7 +3657,13 @@ a0_purge_thread_init(void)
 	a0 = arena_get(TSDN_NULL, 0, false);
 
 	/* a0 purge thread is created during malloc_init. */
-	while ((ret = pthread_create(&purge_thd, NULL, a0_purge_thread, NULL))) {
+	while ((ret = pthread_create(&purge_thd, NULL, arena_purge_thread, (void *)(0)))) {
+		/*
+		 * This normally won't happen as we are creating purge thread for a0. When
+		 * it does, it likely means the system is overloaded by a high number of
+		 * processes / threads. To avoid deadlock, retry for a while and abort if
+		 * still cannot make it.
+		 */
 		sched_yield();
 		if (++n_retry % 8 == 0) {
 			malloc_printf("<jemalloc>: a0 purge thread creation failed (%d). "

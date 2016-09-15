@@ -695,7 +695,7 @@ void	arena_prefork2(tsdn_t *tsdn, arena_t *arena);
 void	arena_prefork3(tsdn_t *tsdn, arena_t *arena);
 void	arena_postfork_parent(tsdn_t *tsdn, arena_t *arena);
 void	arena_postfork_child(tsdn_t *tsdn, arena_t *arena);
-bool	a0_purge_thread_init(void);
+bool	a0_purge_thread_create(void);
 
 
 #endif /* JEMALLOC_H_EXTERNS */
