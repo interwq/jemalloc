@@ -1890,11 +1890,11 @@ arena_cache_merge_stats(arena_t *arena, szind_t binind, uint64_t nrequests)
 }
 
 JEMALLOC_ALWAYS_INLINE void
-arena_cache_stats_merge_locked(arena_t *arena, arena_bin_t *bin,
-		arena_cache_bin_t *cbin, szind_t binind, uint64_t nrequests,
-		const bool is_large)
+arena_cache_stats_merge_locked(arena_t *arena, szind_t binind,
+    arena_cache_bin_t *cbin,  uint64_t nrequests, const bool is_large)
 {
 	uint64_t queued_nrequests;
+	arena_bin_t *bin = &arena->bins[binind];
 
 	if (is_large) {
 		assert(binind >= NBINS);
@@ -1934,8 +1934,7 @@ arena_cache_flush_locked(tsdn_t *tsdn, arena_t *arena, arena_bin_t *bin,
 {
 
 	if (config_stats) {
-		arena_cache_stats_merge_locked(arena, bin, cbin, binind, nrequests,
-		    is_large);
+		arena_cache_stats_merge_locked(arena, binind, cbin, nrequests, is_large);
 	}
 
 	for (size_t i = 0; i < n_items; i++) {
@@ -1960,6 +1959,7 @@ arena_cache_flush_small(tsdn_t *tsdn, arena_t *arena, arena_bin_t *bin,
 {
 	unsigned i, nflush, ndeferred;
 	void *ptr;
+	bool merged_stats = false;
 
 	for (nflush = n_items; nflush > 0; nflush = ndeferred) {
 		/* Process the arena bin associated with the first object. */
@@ -1970,8 +1970,8 @@ arena_cache_flush_small(tsdn_t *tsdn, arena_t *arena, arena_bin_t *bin,
 
 		malloc_mutex_lock(tsdn, &bin->lock);
 		if (config_stats && bin_arena == arena) {
-			arena_cache_stats_merge_locked(arena, bin, cbin, binind, nrequests,
-			    false);
+			merged_stats = true;
+			arena_cache_stats_merge_locked(arena, binind, cbin, nrequests, false);
 		}
 
 		ndeferred = 0;
@@ -1999,6 +1999,15 @@ arena_cache_flush_small(tsdn_t *tsdn, arena_t *arena, arena_bin_t *bin,
 		malloc_mutex_unlock(tsdn, &bin->lock);
 		arena_decay_ticks(tsdn, bin_arena, nflush - ndeferred);
 	}
+	if (config_stats && !merged_stats) {
+		/*
+		 * The flush loop didn't happen to flush to this thread's
+		 * arena, so the stats didn't get merged.  Manually do so now.
+		 */
+		malloc_mutex_lock(tsdn, &bin->lock);
+		arena_cache_stats_merge_locked(arena, binind, cbin, nrequests, false);
+		malloc_mutex_unlock(tsdn, &bin->lock);
+	}
 }
 
 JEMALLOC_ALWAYS_INLINE void
@@ -2008,6 +2017,7 @@ arena_cache_flush_large(tsdn_t *tsdn, arena_t *arena, arena_bin_t *bin,
 {
 	unsigned i, nflush, ndeferred;
 	void *ptr;
+	bool merged_stats = false;
 
 	for (nflush = n_items; nflush > 0; nflush = ndeferred) {
 		/* Process the arena associated with the first object. */
@@ -2016,8 +2026,8 @@ arena_cache_flush_large(tsdn_t *tsdn, arena_t *arena, arena_bin_t *bin,
 
 		malloc_mutex_lock(tsdn, &bin_arena->lock);
 		if (config_stats && bin_arena == arena) {
-			arena_cache_stats_merge_locked(arena, bin, cbin, binind, nrequests,
-			   true);
+			merged_stats = true;
+			arena_cache_stats_merge_locked(arena, binind, cbin, nrequests, true);
 		}
 
 		ndeferred = 0;
@@ -2041,6 +2051,15 @@ arena_cache_flush_large(tsdn_t *tsdn, arena_t *arena, arena_bin_t *bin,
 		malloc_mutex_unlock(tsdn, &bin_arena->lock);
 
 		arena_decay_ticks(tsdn, bin_arena, nflush - ndeferred);
+	}
+	if (config_stats && !merged_stats) {
+		/*
+		 * The flush loop didn't happen to flush to this thread's
+		 * arena, so the stats didn't get merged.  Manually do so now.
+		 */
+		malloc_mutex_lock(tsdn, &arena->lock);
+		arena_cache_stats_merge_locked(arena, binind, cbin, nrequests, true);
+		malloc_mutex_unlock(tsdn, &arena->lock);
 	}
 }
 
