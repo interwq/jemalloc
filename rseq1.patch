@@ -1,0 +1,635 @@
+diff --git a/MAINTAINERS b/MAINTAINERS
+index a306795..5028f03 100644
+--- a/MAINTAINERS
++++ b/MAINTAINERS
+@@ -5204,6 +5204,16 @@ M:	Joe Perches <joe@perches.com>
+ S:	Maintained
+ F:	scripts/get_maintainer.pl
+ 
++RESTARTABLE SEQUENCES SUPPORT
++M:	Mathieu Desnoyers <mathieu.desnoyers@efficios.com>
++M:	Peter Zijlstra <peterz@infradead.org>
++M:	"Paul E. McKenney" <paulmck@linux.vnet.ibm.com>
++M:	Boqun Feng <boqun.feng@gmail.com>
++L:	linux-kernel@vger.kernel.org
++S:	Supported
++F:	kernel/rseq.c
++F:	include/uapi/linux/rseq.h
++
+ GFS2 FILE SYSTEM
+ M:	Steven Whitehouse <swhiteho@redhat.com>
+ M:	Bob Peterson <rpeterso@redhat.com>
+diff --git a/arch/Kconfig b/arch/Kconfig
+index e9c9334..28c4fda 100644
+--- a/arch/Kconfig
++++ b/arch/Kconfig
+@@ -242,6 +242,13 @@ config HAVE_REGS_AND_STACK_ACCESS_API
+ 	  declared in asm/ptrace.h
+ 	  For example the kprobes-based event tracer needs this API.
+ 
++config HAVE_RSEQ
++	bool
++	depends on HAVE_REGS_AND_STACK_ACCESS_API
++	help
++	  This symbol should be selected by an architecture if it
++	  supports an implementation of restartable sequences.
++
+ config HAVE_CLK
+ 	bool
+ 	help
+diff --git a/fs/exec.c b/fs/exec.c
+index 6fcfb3f..5a0a5d7 100644
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -1743,6 +1743,7 @@ static int do_execveat_common(int fd, struct filename *filename,
+ 	/* execve succeeded */
+ 	current->fs->in_exec = 0;
+ 	current->in_execve = 0;
++	rseq_execve(current);
+ 	acct_update_integrals(current);
+ 	task_numa_free(current);
+ 	free_bprm(bprm);
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+index 62c68e5..23c5e7b 100644
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -59,6 +59,7 @@ struct sched_param {
+ #include <linux/gfp.h>
+ #include <linux/magic.h>
+ #include <linux/cgroup-defs.h>
++#include <linux/rseq.h>
+ 
+ #include <asm/processor.h>
+ 
+@@ -1923,6 +1924,11 @@ struct task_struct {
+ #ifdef CONFIG_MMU
+ 	struct task_struct *oom_reaper_list;
+ #endif
++#ifdef CONFIG_RSEQ
++	struct rseq __user *rseq;
++	u32 rseq_event_counter;
++	unsigned int rseq_refcount;
++#endif
+ /* CPU-specific state of this task */
+ 	struct thread_struct thread;
+ /*
+@@ -3481,4 +3487,70 @@ void cpufreq_add_update_util_hook(int cpu, struct update_util_data *data,
+ void cpufreq_remove_update_util_hook(int cpu);
+ #endif /* CONFIG_CPU_FREQ */
+ 
++#ifdef CONFIG_RSEQ
++static inline void rseq_set_notify_resume(struct task_struct *t)
++{
++	if (t->rseq)
++		set_tsk_thread_flag(t, TIF_NOTIFY_RESUME);
++}
++void __rseq_handle_notify_resume(struct pt_regs *regs);
++static inline void rseq_handle_notify_resume(struct pt_regs *regs)
++{
++	if (current->rseq)
++		__rseq_handle_notify_resume(regs);
++}
++/*
++ * If parent process has a registered restartable sequences area, the
++ * child inherits. Only applies when forking a process, not a thread. In
++ * case a parent fork() in the middle of a restartable sequence, set the
++ * resume notifier to force the child to retry.
++ */
++static inline void rseq_fork(struct task_struct *t, unsigned long clone_flags)
++{
++	if (clone_flags & CLONE_THREAD) {
++		t->rseq = NULL;
++		t->rseq_event_counter = 0;
++		t->rseq_refcount = 0;
++	} else {
++		t->rseq = current->rseq;
++		t->rseq_event_counter = current->rseq_event_counter;
++		t->rseq_refcount = current->rseq_refcount;
++		rseq_set_notify_resume(t);
++	}
++}
++static inline void rseq_execve(struct task_struct *t)
++{
++	t->rseq = NULL;
++	t->rseq_event_counter = 0;
++	t->rseq_refcount = 0;
++}
++static inline void rseq_sched_out(struct task_struct *t)
++{
++	rseq_set_notify_resume(t);
++}
++static inline void rseq_signal_deliver(struct pt_regs *regs)
++{
++	rseq_handle_notify_resume(regs);
++}
++#else
++static inline void rseq_set_notify_resume(struct task_struct *t)
++{
++}
++static inline void rseq_handle_notify_resume(struct pt_regs *regs)
++{
++}
++static inline void rseq_fork(struct task_struct *t, unsigned long clone_flags)
++{
++}
++static inline void rseq_execve(struct task_struct *t)
++{
++}
++static inline void rseq_sched_out(struct task_struct *t)
++{
++}
++static inline void rseq_signal_deliver(struct pt_regs *regs)
++{
++}
++#endif
++
+ #endif
+diff --git a/include/uapi/linux/Kbuild b/include/uapi/linux/Kbuild
+index 185f8ea..2a1888a 100644
+--- a/include/uapi/linux/Kbuild
++++ b/include/uapi/linux/Kbuild
+@@ -405,6 +405,7 @@ header-y += tcp_metrics.h
+ header-y += telephony.h
+ header-y += termios.h
+ header-y += thermal.h
++header-y += rseq.h
+ header-y += time.h
+ header-y += times.h
+ header-y += timex.h
+diff --git a/include/uapi/linux/rseq.h b/include/uapi/linux/rseq.h
+new file mode 100644
+index 0000000..ee45be6
+--- /dev/null
++++ b/include/uapi/linux/rseq.h
+@@ -0,0 +1,106 @@
++#ifndef _UAPI_LINUX_RSEQ_H
++#define _UAPI_LINUX_RSEQ_H
++
++/*
++ * linux/rseq.h
++ *
++ * Restartable sequences system call API
++ *
++ * Copyright (c) 2015-2016 Mathieu Desnoyers <mathieu.desnoyers@efficios.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ */
++
++#ifdef __KERNEL__
++# include <linux/types.h>
++#else	/* #ifdef __KERNEL__ */
++# include <stdint.h>
++#endif	/* #else #ifdef __KERNEL__ */
++
++#include <asm/byteorder.h>
++
++#ifdef __LP64__
++# define RSEQ_FIELD_u32_u64(field)	uint64_t field
++#elif defined(__BYTE_ORDER) ? \
++	__BYTE_ORDER == __BIG_ENDIAN : defined(__BIG_ENDIAN)
++# define RSEQ_FIELD_u32_u64(field)	uint32_t _padding ## field, field
++#else
++# define RSEQ_FIELD_u32_u64(field)	uint32_t field, _padding ## field
++#endif
++
++enum rseq_flags {
++	RSEQ_FORCE_UNREGISTER = (1 << 0),
++};
++
++/*
++ * struct rseq_cs is aligned on 4 * 8 bytes to ensure it is always
++ * contained within a single cache-line. It is usually declared as
++ * link-time constant data.
++ */
++struct rseq_cs {
++	RSEQ_FIELD_u32_u64(start_ip);
++	RSEQ_FIELD_u32_u64(post_commit_ip);
++	RSEQ_FIELD_u32_u64(abort_ip);
++} __attribute__((aligned(4 * sizeof(uint64_t))));
++
++union rseq_cpu_event {
++	struct {
++		/*
++		 * Restartable sequences cpu_id field.
++		 * Updated by the kernel, and read by user-space with
++		 * single-copy atomicity semantics. Aligned on 32-bit.
++		 * Negative values are reserved for user-space.
++		 */
++		int32_t cpu_id;
++		/*
++		 * Restartable sequences event_counter field.
++		 * Updated by the kernel, and read by user-space with
++		 * single-copy atomicity semantics. Aligned on 32-bit.
++		 */
++		uint32_t event_counter;
++	} e;
++	/*
++	 * On architectures with 64-bit aligned reads, both cpu_id and
++	 * event_counter can be read with single-copy atomicity
++	 * semantics.
++	 */
++	uint64_t v;
++};
++
++/*
++ * struct rseq is aligned on 2 * 8 bytes to ensure it is always
++ * contained within a single cache-line.
++ */
++struct rseq {
++	union rseq_cpu_event u;
++	/*
++	 * Restartable sequences rseq_cs field.
++	 * Contains NULL when no critical section is active for the
++	 * current thread, or holds a pointer to the currently active
++	 * struct rseq_cs.
++	 * Updated by user-space at the beginning and end of assembly
++	 * instruction sequence block, and by the kernel when it
++	 * restarts an assembly instruction sequence block. Read by the
++	 * kernel with single-copy atomicity semantics. Aligned on
++	 * 64-bit.
++	 */
++	RSEQ_FIELD_u32_u64(rseq_cs);
++} __attribute__((aligned(2 * sizeof(uint64_t))));
++
++#endif /* _UAPI_LINUX_RSEQ_H */
+diff --git a/init/Kconfig b/init/Kconfig
+index cac3f09..8da994a 100644
+--- a/init/Kconfig
++++ b/init/Kconfig
+@@ -1656,6 +1656,19 @@ config MEMBARRIER
+ 
+ 	  If unsure, say Y.
+ 
++config RSEQ
++	bool "Enable rseq() system call" if EXPERT
++	default y
++	depends on HAVE_RSEQ
++	help
++	  Enable the restartable sequences system call. It provides a
++	  user-space cache for the current CPU number value, which
++	  speeds up getting the current CPU number from user-space,
++	  as well as an ABI to speed up user-space operations on
++	  per-CPU data.
++
++	  If unsure, say Y.
++
+ config EMBEDDED
+ 	bool "Embedded system"
+ 	option allnoconfig_y
+diff --git a/kernel/Makefile b/kernel/Makefile
+index e2ec54e..4c6d8b5 100644
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -112,6 +112,7 @@ obj-$(CONFIG_TORTURE_TEST) += torture.o
+ obj-$(CONFIG_MEMBARRIER) += membarrier.o
+ 
+ obj-$(CONFIG_HAS_IOMEM) += memremap.o
++obj-$(CONFIG_RSEQ) += rseq.o
+ 
+ $(obj)/configs.o: $(obj)/config_data.h
+ 
+diff --git a/kernel/fork.c b/kernel/fork.c
+index 52e725d..784bd97 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -1589,6 +1589,8 @@ static struct task_struct *copy_process(unsigned long clone_flags,
+ 	 */
+ 	copy_seccomp(p);
+ 
++	rseq_fork(p, clone_flags);
++
+ 	/*
+ 	 * Process group and session signals need to be delivered to just the
+ 	 * parent before the fork or both the parent and the child after the
+diff --git a/kernel/rseq.c b/kernel/rseq.c
+new file mode 100644
+index 0000000..32bc1d2
+--- /dev/null
++++ b/kernel/rseq.c
+@@ -0,0 +1,287 @@
++/*
++ * Restartable sequences system call
++ *
++ * Restartable sequences are a lightweight interface that allows
++ * user-level code to be executed atomically relative to scheduler
++ * preemption and signal delivery. Typically used for implementing
++ * per-cpu operations.
++ *
++ * It allows user-space to perform update operations on per-cpu data
++ * without requiring heavy-weight atomic operations.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * Copyright (C) 2015, Google, Inc.,
++ * Paul Turner <pjt@google.com> and Andrew Hunter <ahh@google.com>
++ * Copyright (C) 2015-2016, EfficiOS Inc.,
++ * Mathieu Desnoyers <mathieu.desnoyers@efficios.com>
++ */
++
++#include <linux/sched.h>
++#include <linux/uaccess.h>
++#include <linux/syscalls.h>
++#include <linux/rseq.h>
++#include <linux/types.h>
++#include <asm/ptrace.h>
++
++/*
++ * The restartable sequences mechanism is the overlap of two distinct
++ * restart mechanisms: a sequence counter tracking preemption and signal
++ * delivery for high-level code, and an ip-fixup-based mechanism for the
++ * final assembly instruction sequence.
++ *
++ * A high-level summary of the algorithm to use rseq from user-space is
++ * as follows:
++ *
++ * The high-level code between rseq_start() and rseq_finish() loads the
++ * current value of the sequence counter in rseq_start(), and then it
++ * gets compared with the new current value within the rseq_finish()
++ * restartable instruction sequence. Between rseq_start() and
++ * rseq_finish(), the high-level code can perform operations that do not
++ * have side-effects, such as getting the current CPU number, and
++ * loading from variables.
++ *
++ * Stores are performed at the very end of the restartable sequence 
++ * assembly block. Each assembly block within rseq_finish() defines a
++ * "struct rseq_cs" structure which describes the start_ip and
++ * post_commit_ip addresses, as well as the abort_ip address where the
++ * kernel should move the thread instruction pointer if a rseq critical
++ * section assembly block is preempted or if a signal is delivered on
++ * top of a rseq critical section assembly block.
++ *
++ * Detailed algorithm of rseq use:
++ *
++ * rseq_start()
++ *
++ *   0. Userspace loads the current event counter value from the
++ *      event_counter field of the registered struct rseq TLS area,
++ *
++ * rseq_finish()
++ *
++ *   Steps [1]-[3] (inclusive) need to be a sequence of instructions in
++ *   userspace that can handle being moved to the abort_ip between any
++ *   of those instructions.
++ *
++ *   The abort_ip address needs to be less than start_ip, or
++ *   greater-or-equal the post_commit_ip. Step [4] and the failure
++ *   code step [F1] need to be at addresses lesser than start_ip, or
++ *   greater-or-equal the post_commit_ip.
++ *
++ *       [start_ip]
++ *   1.  Userspace stores the address of the struct rseq_cs assembly
++ *       block descriptor into the rseq_cs field of the registered
++ *       struct rseq TLS area. This update is performed through a single
++ *       store, followed by a compiler barrier which prevents the
++ *       compiler from moving following loads or stores before this
++ *       store.
++ *
++ *   2.  Userspace tests to see whether the current event counter value
++ *       match the value loaded at [0]. Manually jumping to [F1] in case
++ *       of a mismatch.
++ *
++ *       Note that if we are preempted or interrupted by a signal
++ *       after [1] and before post_commit_ip, then the kernel also
++ *       performs the comparison performed in [2], and conditionally
++ *       clears the rseq_cs field of struct rseq, then jumps us to
++ *       abort_ip.
++ *
++ *   3.  Userspace critical section final instruction before
++ *       post_commit_ip is the commit. The critical section is
++ *       self-terminating.
++ *       [post_commit_ip]
++ *
++ *   4.  Userspace clears the rseq_cs field of the struct rseq
++ *       TLS area.
++ *
++ *   5.  Return true.
++ *
++ *   On failure at [2]:
++ *
++ *   F1. Userspace clears the rseq_cs field of the struct rseq
++ *       TLS area. Followed by step [F2].
++ *
++ *       [abort_ip]
++ *   F2. Return false.
++ */
++
++/*
++ * The rseq_event_counter allow user-space to detect preemption and
++ * signal delivery. It increments at least once before returning to
++ * user-space if a thread is preempted or has a signal delivered. It is
++ * not meant to be an exact counter of such events.
++ *
++ * Overflow of the event counter is not a problem in practice. It
++ * increments at most once between each user-space thread instruction
++ * executed, so we would need a thread to execute 2^32 instructions or
++ * more between rseq_start() and rseq_finish(), while single-stepping,
++ * for this to be an issue.
++ *
++ * On 64-bit architectures, both cpu_id and event_counter can be updated
++ * with a single 64-bit store. On 32-bit architectures, __put_user() is
++ * expected to perform two 32-bit single-copy stores to guarantee
++ * single-copy atomicity semantics for other threads.
++ */
++static bool rseq_update_cpu_id_event_counter(struct task_struct *t)
++{
++	union rseq_cpu_event u;
++
++	u.e.cpu_id = raw_smp_processor_id();
++	u.e.event_counter = ++t->rseq_event_counter;
++	if (__put_user(u.v, &t->rseq->u.v))
++		return false;
++	return true;
++}
++
++static bool rseq_get_rseq_cs(struct task_struct *t,
++		void __user **start_ip,
++		void __user **post_commit_ip,
++		void __user **abort_ip)
++{
++	unsigned long ptr;
++	struct rseq_cs __user *urseq_cs;
++	struct rseq_cs rseq_cs;
++
++	if (__get_user(ptr, &t->rseq->rseq_cs))
++		return false;
++	if (!ptr)
++		return true;
++	urseq_cs = (struct rseq_cs __user *)ptr;
++	if (copy_from_user(&rseq_cs, urseq_cs, sizeof(rseq_cs)))
++		return false;
++	*start_ip = (void __user *)rseq_cs.start_ip;
++	*post_commit_ip = (void __user *)rseq_cs.post_commit_ip;
++	*abort_ip = (void __user *)rseq_cs.abort_ip;
++	return true;
++}
++
++static bool rseq_ip_fixup(struct pt_regs *regs)
++{
++	struct task_struct *t = current;
++	void __user *start_ip = NULL;
++	void __user *post_commit_ip = NULL;
++	void __user *abort_ip = NULL;
++
++	if (!rseq_get_rseq_cs(t, &start_ip, &post_commit_ip, &abort_ip))
++		return false;
++
++	/* Handle potentially not being within a critical section. */
++	if ((void __user *)instruction_pointer(regs) >= post_commit_ip ||
++			(void __user *)instruction_pointer(regs) < start_ip)
++		return true;
++
++	/*
++	 * We need to clear rseq_cs upon entry into a signal
++	 * handler nested on top of a rseq assembly block, so
++	 * the signal handler will not be fixed up if itself
++	 * interrupted by a nested signal handler or preempted.
++	 */
++	if (clear_user(&t->rseq->rseq_cs, sizeof(t->rseq->rseq_cs)))
++		return false;
++
++	/*
++	 * We set this after potentially failing in
++	 * clear_user so that the signal arrives at the
++	 * faulting rip.
++	 */
++	instruction_pointer_set(regs, (unsigned long)abort_ip);
++	return true;
++}
++
++/*
++ * This resume handler should always be executed between any of:
++ * - preemption,
++ * - signal delivery,
++ * and return to user-space.
++ *
++ * This is how we can ensure that the entire rseq critical section,
++ * consisting of both the C part and the assembly instruction sequence,
++ * will issue the commit instruction only if executed atomically with
++ * respect to other threads scheduled on the same CPU, and with respect
++ * to signal handlers.
++ */
++void __rseq_handle_notify_resume(struct pt_regs *regs)
++{
++	struct task_struct *t = current;
++
++	if (unlikely(t->flags & PF_EXITING))
++		return;
++	if (!access_ok(VERIFY_WRITE, t->rseq, sizeof(*t->rseq)))
++		goto error;
++	if (!rseq_update_cpu_id_event_counter(t))
++		goto error;
++	if (!rseq_ip_fixup(regs))
++		goto error;
++	return;
++
++error:
++	force_sig(SIGSEGV, t);
++}
++
++/*
++ * sys_rseq - setup restartable sequences for caller thread.
++ */
++SYSCALL_DEFINE2(rseq, struct rseq __user *, rseq, int, flags)
++{
++	if (!rseq) {
++		/* Unregister rseq for current thread. */
++		if (unlikely(flags & ~RSEQ_FORCE_UNREGISTER))
++			return -EINVAL;
++		if (flags & RSEQ_FORCE_UNREGISTER) {
++			current->rseq = NULL;
++			current->rseq_refcount = 0;
++			return 0;
++		}
++		if (!current->rseq_refcount)
++			return -ENOENT;
++		if (!--current->rseq_refcount)
++			current->rseq = NULL;
++		return 0;
++	}
++
++	if (unlikely(flags))
++		return -EINVAL;
++
++	if (current->rseq) {
++		/*
++		 * If rseq is already registered, check whether
++		 * the provided address differs from the prior
++		 * one.
++		 */
++		BUG_ON(!current->rseq_refcount);
++		if (current->rseq != rseq)
++			return -EBUSY;
++		if (current->rseq_refcount == UINT_MAX)
++			return -EOVERFLOW;
++		current->rseq_refcount++;
++	} else {
++		/*
++		 * If there was no rseq previously registered,
++		 * we need to ensure the provided rseq is
++		 * properly aligned and valid.
++		 */
++		BUG_ON(current->rseq_refcount);
++		if (!IS_ALIGNED((unsigned long)rseq, __alignof__(*rseq)))
++			return -EINVAL;
++		if (!access_ok(VERIFY_WRITE, rseq, sizeof(*rseq)))
++			return -EFAULT;
++		current->rseq = rseq;
++		current->rseq_refcount = 1;
++		/*
++		 * If rseq was previously inactive, and has just
++		 * been registered, ensure the cpu_id and
++		 * event_counter fields are updated before
++		 * returning to user-space.
++		 */
++		rseq_set_notify_resume(current);
++	}
++
++	return 0;
++}
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+index 2a906f2..e285f68 100644
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -2672,6 +2672,7 @@ prepare_task_switch(struct rq *rq, struct task_struct *prev,
+ {
+ 	sched_info_switch(rq, prev, next);
+ 	perf_event_task_sched_out(prev, next);
++	rseq_sched_out(prev);
+ 	fire_sched_out_preempt_notifiers(prev, next);
+ 	prepare_lock_switch(rq, next);
+ 	prepare_arch_switch(next);
+diff --git a/kernel/sys_ni.c b/kernel/sys_ni.c
+index 2c5e3a8..c653f78 100644
+--- a/kernel/sys_ni.c
++++ b/kernel/sys_ni.c
+@@ -250,3 +250,6 @@ cond_syscall(sys_execveat);
+ 
+ /* membarrier */
+ cond_syscall(sys_membarrier);
++
++/* restartable sequence */
++cond_syscall(sys_rseq);

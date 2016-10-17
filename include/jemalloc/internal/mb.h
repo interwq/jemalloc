@@ -13,7 +13,9 @@
 /******************************************************************************/
 #ifdef JEMALLOC_H_INLINES
 
+#ifndef ACCESS_ONCE
 #define ACCESS_ONCE(x) (*(volatile typeof(x) *)&(x))
+#endif
 
 #ifndef JEMALLOC_ENABLE_INLINE
 void	mb_write(void);

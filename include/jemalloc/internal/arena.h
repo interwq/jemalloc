@@ -1,5 +1,9 @@
+#include "rseq.h"
+
 /******************************************************************************/
 #ifdef JEMALLOC_H_TYPES
+
+extern struct rseq_lock rseq_lock;
 
 #define	LARGE_MINCLASS		(ZU(1) << LG_LARGE_MINCLASS)
 
@@ -1788,17 +1792,17 @@ label_retry:
  * allocations only.
  */
 JEMALLOC_ALWAYS_INLINE void *
-cbin_alloc(arena_cache_bin_t *cbin)
+cbin_alloc(struct rseq_state* start, arena_cache_bin_t *cbin)
 {
 	acache_state_t state, new_state;
 	size_t ncached, low_water, retry;
-	bool cas_fail, locked;
+	bool locked;
 	void *ret;
 
 	retry = 0;
-label_retry:
+	//label_retry:
 	state = cbin_state_get(cbin, &ncached, &low_water, &locked);
-	if (locked || (ncached == 0))
+	if (/* locked || */ (ncached == 0))
 		return (0);
 
 	ret = cbin->avail[ncached - 1];
@@ -1809,14 +1813,17 @@ label_retry:
 		low_water = ncached = ncached - 1;
 		new_state = cbin_state_pack(state, ncached, low_water, false);
 	}
-	cas_fail = cbin_state_commit(cbin, state, new_state);
-	if (unlikely(cas_fail)) {
-		assert((ACCESS_ONCE(cbin->data) >> ACACHE_EPOCH_OFF) !=
-		    (state >> ACACHE_EPOCH_OFF));
-		if (retry++ == ACACHE_CAS_FAIL_RETRY_MAX) {
-			return (0);
-		}
-		SPINWAIT_RETRY;
+	// cas_fail = cbin_state_commit(cbin, state, new_state);
+	// if (unlikely(cas_fail)) {
+	
+	if (!rseq_finish(&rseq_lock, (intptr_t*)&cbin->data, (intptr_t)new_state, *start)) {
+	  return 0;
+		/* assert((ACCESS_ONCE(cbin->data) >> ACACHE_EPOCH_OFF) != */
+		/*     (state >> ACACHE_EPOCH_OFF)); */
+		/* if (retry++ == ACACHE_CAS_FAIL_RETRY_MAX) { */
+		/* 	return (0); */
+		/* } */
+		/* SPINWAIT_RETRY; */
 	}
 
 	return (ret);
@@ -1827,12 +1834,19 @@ JEMALLOC_ALWAYS_INLINE void *
 arena_cache_alloc_large(tsdn_t *tsdn, arena_t *arena, szind_t binind,
     size_t usize, bool zero)
 {
-	arena_cache_bin_t *cbin = &arena->acache->cbins[binind];
+  //	arena_cache_bin_t *cbin = &arena->acache->cbins[binind];
+  arena_cache_bin_t *cbin;// = &arena->acache->cbins[binind];  
 	void *ret = NULL;
+	int cpu;
+
+	struct rseq_state start;
+	start = rseq_start(&rseq_lock);
+	cpu = rseq_current_cpu();
+	cbin = &arenas[cpu]->acache->cbins[binind];
 
 	assert(binind <= nhbins);
 	if (!zero) {
-		ret = cbin_alloc(cbin);
+	  ret = cbin_alloc(&start, cbin);
 	}
 
 	return ret ? ret : arena_malloc_large(tsdn, arena, binind, zero);

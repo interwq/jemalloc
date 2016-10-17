@@ -4,6 +4,8 @@
 /******************************************************************************/
 /* Data. */
 
+struct rseq_lock rseq_lock;
+
 bool	opt_acache = false;
 /* Size of acache, relative to tcache. */
 unsigned opt_acache_size_ratio = ACACHE_SIZE_RATIO_DEFAULT;
