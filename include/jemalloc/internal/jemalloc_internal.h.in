@@ -8,6 +8,8 @@
 #include <sys/ktrace.h>
 #endif
 
+#define RSEQ_JEMALLOC
+
 #define	JEMALLOC_NO_DEMANGLE
 #ifdef JEMALLOC_JET
 #  define JEMALLOC_N(n) jet_##n
@@ -830,7 +832,11 @@ percpu_arena_choose(void)
 
 	assert(malloc_getcpu() >= 0);
 	assert(opt_percpu_arena != percpu_arena_disable);
+#ifdef RSEQ_JEMALLOC
+        cpuid = rseq_current_cpu();
+#else
 	cpuid = malloc_getcpu();
+#endif
 	if (opt_percpu_arena == per_phycpu_arena_enable &&
 	    cpuid >= ncpus / 2) {
 		/* Hyper threads on the same CPU share arena. */

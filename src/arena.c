@@ -1511,37 +1511,47 @@ arena_maybe_purge_decay(tsdn_t *tsdn, arena_t *arena)
 	arena_purge_to_limit(tsdn, arena, ndirty_limit);
 }
 
-void arena_cache_gc(tsdn_t *tsdn, arena_t *arena)
+void arena_cache_gc(tsdn_t *tsdn, arena_t *arena_not_used)
 {
 	arena_cache_bin_t *cbin;
 	acache_state_t state, new_state;
-	size_t low_water, ncached;
+	size_t low_water, ncached, ret;
 	unsigned gc_bin;
 	bool locked;
+        arena_t *arena;
+	struct rseq_state start;
+        int cpu;
 
-	gc_bin = atomic_add_u(&(arena->acache->next_gc_bin), 1) % nhbins;
+	start = rseq_start(&rseq_lock);
+        cpu = rseq_cpu_at_start(start);
+        arena = arena_get(tsdn, cpu, true);
+
+        gc_bin = arena->acache->next_gc_bin;
+	if (!rseq_finish(&rseq_lock, (intptr_t*)&arena->acache->next_gc_bin, (intptr_t)(gc_bin + 1), start))
+          return;
+
 	cbin = &arena->acache->cbins[gc_bin];
-
 	state = cbin_state_get(cbin, &ncached, &low_water, &locked);
-	if (locked)
-		return;
 
 	if (low_water > 0) {
-		if (cbin_lock(cbin, &state)) {
-			return;
-		}
+          void *to_flush[low_water];
+          ret = cbin_alloc_to_buf(&start, cbin, to_flush, low_water);
+          if (ret) {
+            arena_cache_flush(tsdn, arena, &arena->bins[gc_bin], cbin, to_flush, ret,
+                            gc_bin, 0, gc_bin >= NBINS ? true : false);
+          }
 
-		assert(low_water <= ncached);
-		arena_cache_flush(tsdn, arena, &arena->bins[gc_bin], cbin,
-		    &cbin->avail[ncached - low_water], low_water, gc_bin, 0,
-		    gc_bin >= NBINS ? true : false);
-		ncached = ncached - low_water;
-		/* Fall through to update low_water and unlock. */
+          if (ret != low_water)
+            return;
+
+          ncached = ncached - low_water;
+          /* Fall through to update low_water. */
 	}
 
 	low_water = ncached;
 	new_state = cbin_state_pack(state, ncached, low_water, false);
-	cbin_state_commit(cbin, state, new_state);
+
+        rseq_finish(&rseq_lock, (intptr_t*)&cbin->data, (intptr_t)new_state, start);
 }
 
 void

@@ -1646,6 +1646,7 @@ cbin_state_commit(arena_cache_bin_t *cbin, const acache_state_t old_state,
 {
 	UNUSED unsigned ncached, low_water;
 
+        assert(0);
 	ncached = new_state & ACACHE_NCACHED_MASK;
 	low_water = (new_state >> ACACHE_NCACHED_BITS) & ACACHE_NCACHED_MASK;
 	assert(low_water <= ncached);
@@ -1680,6 +1681,7 @@ cbin_lock(arena_cache_bin_t *cbin, acache_state_t *state)
 	acache_state_t new_state, old_state;
 	bool cas_fail;
 
+        assert(0);
 	old_state = *state;
 	assert(!(old_state & ACACHE_LOCKBIT));
 
@@ -1697,6 +1699,7 @@ cbin_lock_and_get_info(arena_cache_bin_t *cbin, acache_state_t *state,
 {
 	bool bin_locked, cas_fail;
 	unsigned retry = 0;
+        assert(0);
 label_retry:
 	*state = cbin_state_get(cbin, ncached, low_water, &bin_locked);
 	if (bin_locked) {
@@ -1730,10 +1733,11 @@ cbin_state_pack(const acache_state_t state, const size_t ncached,
 	uint64_t epoch;
 
 	/* Update epoch when getting the new state. */
-	epoch = (state >> ACACHE_EPOCH_OFF) + 1;
+	epoch = 0;//(state >> ACACHE_EPOCH_OFF) + 1;
 	new_state = (epoch << ACACHE_EPOCH_OFF) | ncached |
 		(low_water << ACACHE_NCACHED_BITS);
 
+        assert(!locked);
 	if (locked) {
 		new_state |= ACACHE_LOCKBIT;
 	}
@@ -1743,46 +1747,86 @@ cbin_state_pack(const acache_state_t state, const size_t ncached,
 
 /* Return number of items allocated */
 JEMALLOC_ALWAYS_INLINE size_t
-cbin_alloc_to_tbin(arena_cache_bin_t *cbin, tcache_bin_t *tbin,
+cbin_alloc_to_tbin(struct rseq_state* start,
+    arena_cache_bin_t *cbin, tcache_bin_t *tbin,
     unsigned n_alloc)
 {
 	acache_state_t state, new_state;
-	size_t ncached, low_water, retry;
-	bool cas_fail, locked;
+	size_t ncached, low_water/* , retry */;
+	bool /* cas_fail, */ locked;
 
-	retry = 0;
-label_retry:
+	/* retry = 0; */
+/* label_retry: */
 	state = cbin_state_get(cbin, &ncached, &low_water, &locked);
-	if (locked || (ncached == 0))
+        assert(!locked);
+	if (/* locked || */ (ncached == 0))
 		return (0);
 
 	if (n_alloc > ncached)
 		n_alloc = ncached;
 
 	assert(tbin->ncached == 0);
-	/* tbin->avail[-ncached ... -1] are available items. */
-	memcpy(&tbin->avail[-(int)n_alloc], &cbin->avail[ncached - n_alloc],
-	    sizeof(void *) * n_alloc);
-
 	/* Update state and low_water if necessary */
 	if (low_water <= ncached - n_alloc) {
-		new_state = cbin_state_adjust(state, -n_alloc, true);
+		new_state = cbin_state_adjust(state, -n_alloc, false);
 	} else {
 		low_water = ncached = ncached - n_alloc;
 		new_state = cbin_state_pack(state, ncached, low_water, false);
 	}
 
-	cas_fail = cbin_state_commit(cbin, state, new_state);
-	if (unlikely(cas_fail)) {
-		assert((ACCESS_ONCE(cbin->data) >> ACACHE_EPOCH_OFF) !=
-		    (state >> ACACHE_EPOCH_OFF));
-		if (retry++ == ACACHE_CAS_FAIL_RETRY_MAX) {
-			return (0);
-		}
-		SPINWAIT_RETRY;
-	}
+        /* No need to rseq_finish_memcpy here. We are copying out from the
+         * percpu cache. rseq_finish will fail if the memcpy isn't valid. */
+
+        /* tbin->avail[-ncached ... -1] are available items. */
+	memcpy(&tbin->avail[-(int)n_alloc], &cbin->avail[ncached - n_alloc],
+	    sizeof(void *) * n_alloc);
+
+	if (!rseq_finish(&rseq_lock, (intptr_t*)&cbin->data, (intptr_t)new_state, *start)) {
+	  return 0;
+        }
+
 	assert(tbin->avail[-(int)n_alloc] && tbin->avail[-1]);
 	tbin->ncached = n_alloc;
+
+	return (n_alloc);
+}
+
+JEMALLOC_ALWAYS_INLINE size_t
+cbin_alloc_to_buf(struct rseq_state* start,
+    arena_cache_bin_t *cbin, void **buf,
+    unsigned n_alloc)
+{
+	acache_state_t state, new_state;
+	size_t ncached, low_water/* , retry */;
+	bool /* cas_fail, */ locked;
+
+	/* retry = 0; */
+/* label_retry: */
+	state = cbin_state_get(cbin, &ncached, &low_water, &locked);
+        assert(!locked);
+	if (/* locked || */ (ncached == 0))
+		return (0);
+
+	if (n_alloc > ncached)
+		n_alloc = ncached;
+
+	/* Update state and low_water if necessary */
+	if (low_water <= ncached - n_alloc) {
+		new_state = cbin_state_adjust(state, -n_alloc, false);
+	} else {
+		low_water = ncached = ncached - n_alloc;
+		new_state = cbin_state_pack(state, ncached, low_water, false);
+	}
+
+        /* No need to rseq_finish_memcpy here. We are copying out from the
+         * percpu cache. rseq_finish will fail if the memcpy isn't valid. */
+
+	memcpy(buf, &cbin->avail[ncached - n_alloc],
+	    sizeof(void *) * n_alloc);
+
+	if (!rseq_finish(&rseq_lock, (intptr_t*)&cbin->data, (intptr_t)new_state, *start)) {
+	  return 0;
+        }
 
 	return (n_alloc);
 }
@@ -1795,13 +1839,14 @@ JEMALLOC_ALWAYS_INLINE void *
 cbin_alloc(struct rseq_state* start, arena_cache_bin_t *cbin)
 {
 	acache_state_t state, new_state;
-	size_t ncached, low_water, retry;
+	size_t ncached, low_water/* , retry */;
 	bool locked;
 	void *ret;
 
-	retry = 0;
-	//label_retry:
+/* 	retry = 0; */
+/* label_retry: */
 	state = cbin_state_get(cbin, &ncached, &low_water, &locked);
+        assert(!locked);
 	if (/* locked || */ (ncached == 0))
 		return (0);
 
@@ -1815,7 +1860,7 @@ cbin_alloc(struct rseq_state* start, arena_cache_bin_t *cbin)
 	}
 	// cas_fail = cbin_state_commit(cbin, state, new_state);
 	// if (unlikely(cas_fail)) {
-	
+
 	if (!rseq_finish(&rseq_lock, (intptr_t*)&cbin->data, (intptr_t)new_state, *start)) {
 	  return 0;
 		/* assert((ACCESS_ONCE(cbin->data) >> ACACHE_EPOCH_OFF) != */
@@ -1831,22 +1876,28 @@ cbin_alloc(struct rseq_state* start, arena_cache_bin_t *cbin)
 
 /* Allocated a single item. Use cached memory if available. */
 JEMALLOC_ALWAYS_INLINE void *
-arena_cache_alloc_large(tsdn_t *tsdn, arena_t *arena, szind_t binind,
+arena_cache_alloc_large(tsdn_t *tsdn, arena_t *arena_not_used, szind_t binind,
     size_t usize, bool zero)
 {
   //	arena_cache_bin_t *cbin = &arena->acache->cbins[binind];
-  arena_cache_bin_t *cbin;// = &arena->acache->cbins[binind];  
+  arena_cache_bin_t *cbin;// = &arena->acache->cbins[binind];
 	void *ret = NULL;
 	int cpu;
-
 	struct rseq_state start;
-	start = rseq_start(&rseq_lock);
-	cpu = rseq_current_cpu();
-	cbin = &arenas[cpu]->acache->cbins[binind];
+        arena_t *arena;
 
+label_retry:
+	start = rseq_start(&rseq_lock);
+	cpu = rseq_cpu_at_start(start);
+        arena = arena_get(tsdn, cpu, true);
+
+	cbin = &arena->acache->cbins[binind];
 	assert(binind <= nhbins);
 	if (!zero) {
 	  ret = cbin_alloc(&start, cbin);
+          if (unlikely(!ret && cpu != rseq_current_cpu())) {
+              goto label_retry;
+          }
 	}
 
 	return ret ? ret : arena_malloc_large(tsdn, arena, binind, zero);
@@ -1857,11 +1908,20 @@ arena_cache_alloc_large(tsdn_t *tsdn, arena_t *arena, szind_t binind,
  * items filled.
  */
 JEMALLOC_ALWAYS_INLINE size_t
-arena_cache_alloc_small(tsdn_t *tsdn, arena_t *arena, tcache_t *tcache,
+arena_cache_alloc_small(tsdn_t *tsdn, arena_t *arena_not_used, tcache_t *tcache,
     tcache_bin_t *tbin, szind_t binind)
 {
-	arena_cache_bin_t *cbin = &arena->acache->cbins[binind];
-	size_t nfill;
+  arena_cache_bin_t *cbin;// = &arena->acache->cbins[binind];
+  size_t nfill, ret;
+        int cpu;
+        arena_t *arena;
+	struct rseq_state start;
+
+label_retry:
+	start = rseq_start(&rseq_lock);
+	cpu = rseq_cpu_at_start(start);
+        arena = arena_get(tsdn, cpu, true);
+	cbin = &arena->acache->cbins[binind];
 
 	assert(binind < NBINS);
 	nfill = tcache_bin_info[binind].ncached_max >> tbin->lg_fill_div;
@@ -1890,7 +1950,12 @@ arena_cache_alloc_small(tsdn_t *tsdn, arena_t *arena, tcache_t *tcache,
 		ACCESS_ONCE(cbin->n_items_last_thd) = n_items_last_thd - nfill;
 	}
 
-	return cbin_alloc_to_tbin(cbin, tbin, nfill);
+	ret = cbin_alloc_to_tbin(&start, cbin, tbin, nfill);
+        if (!ret && cpu != rseq_current_cpu()) {
+          goto label_retry;
+        }
+
+        return ret;
 }
 
 JEMALLOC_ALWAYS_INLINE void
@@ -2096,21 +2161,34 @@ arena_cache_flush(tsdn_t *tsdn, arena_t *arena, arena_bin_t *bin,
 
 
 JEMALLOC_ALWAYS_INLINE void
-arena_cache_dalloc(tsdn_t *tsdn, arena_t *arena, void **items,
+arena_cache_dalloc(tsdn_t *tsdn, arena_t *arena_not_used, void **items,
     size_t n_items, szind_t binind, uint64_t nrequests, const bool is_large)
 {
-	arena_bin_t *bin = &arena->bins[binind];
-	arena_cache_bin_t *cbin = &arena->acache->cbins[binind];
-	acache_state_t state;
+  int cpu;
+  arena_t *arena;
+  arena_bin_t *bin;
+  arena_cache_bin_t *cbin;
+  acache_state_t state, new_state;
 	size_t ncached, low_water;
+        bool bin_locked;
+        struct rseq_state start;
 
-	if (!config_acache || !opt_acache ||
-	    cbin_lock_and_get_info(cbin, &state, &ncached, &low_water)) {
+label_retry:
+	start = rseq_start(&rseq_lock);
+
+        cpu = rseq_cpu_at_start(start);
+        arena = arena_get(tsdn, cpu, true);
+        bin = &arena->bins[binind];
+        cbin = &arena->acache->cbins[binind];
+	if (!config_acache || !opt_acache /* || */
+	    /* cbin_lock_and_get_info(cbin, &state, &ncached, &low_water) */) {
 		/* Flush back to arena if acache is not available. */
-		arena_cache_flush(tsdn, arena, bin, cbin, items, n_items, binind,
+          arena_cache_flush(tsdn, arena, bin, cbin, items, n_items, binind,
 		    nrequests, is_large);
 		return;
 	}
+        state = cbin_state_get(cbin, &ncached, &low_water, &bin_locked);
+        assert(!bin_locked);
 
 	assert(n_items <= arena_cache_bin_info[binind].ncached_max);
 	/* Check if need to flush some items back to arena. */
@@ -2118,13 +2196,19 @@ arena_cache_dalloc(tsdn_t *tsdn, arena_t *arena, void **items,
 		/* Queue the stats update as we are not going to lock the arena. */
 		arena_cache_merge_stats(arena, binind, nrequests);
 	} else {
+          void *to_flush[ncached];
+          size_t ret;
 		if (binind < opt_acache_bypass) {
 			assert(!is_large);
-			arena_cache_flush_small(tsdn, arena, bin, cbin, cbin->avail, ncached,
+                        ret = cbin_alloc_to_buf(&start, cbin, to_flush, ncached);
+			arena_cache_flush_small(tsdn, arena, bin, cbin, to_flush, ret,
 			    binind, nrequests);
-			state = cbin_state_pack(state, 0, 0, true);
+			state = cbin_state_pack(state, 0, 0, false);
 			ncached = low_water = 0;
 			cbin->last_thd = NULL;
+                        if (ret != ncached) {
+                          goto label_retry;
+                        }
 		} else {
 			size_t nkeep, nflush;
 
@@ -2140,20 +2224,25 @@ arena_cache_dalloc(tsdn_t *tsdn, arena_t *arena, void **items,
 			nflush = ncached - nkeep;
 			assert(nkeep < ncached);
 
+                        ret = cbin_alloc_to_buf(&start, cbin, to_flush, nflush);
 			/*
 			 * If we use cbin_alloc to get items from the cbin, it's possible to avoid
 			 * locking the cbin while flushing to arena. However it requires additional
 			 * memcpy in that case.
 			 */
-			arena_cache_flush(tsdn, arena, bin, cbin, &cbin->avail[nkeep],
-			    nflush, binind, nrequests, is_large);
+			arena_cache_flush(tsdn, arena, bin, cbin, to_flush, ret,
+                                          binind, nrequests, is_large);
+
+                        if (ret != nflush) {
+                          goto label_retry;
+                        }
 
 			/* Update state which will be used for unlocking. */
 			ncached = nkeep;
 			if (low_water > nkeep + n_items) {
 				low_water = nkeep + n_items;
 				/* ncached will be adjusted when commiting */
-				state = cbin_state_pack(state, ncached, low_water, true);
+				state = cbin_state_pack(state, ncached, low_water, false);
 			} else {
 				state = cbin_state_adjust(state, -nflush, false);
 			}
@@ -2161,16 +2250,6 @@ arena_cache_dalloc(tsdn_t *tsdn, arena_t *arena, void **items,
 		}
 	}
 	assert(ncached + n_items <= arena_cache_bin_info[binind].ncached_max);
-
-	/*
-	 * Do the memcpy, then release the bitlock & update ncached in a single
-	 * store.
-	 */
-	memcpy(&cbin->avail[ncached], items, sizeof(void *) * n_items);
-	cc_barrier(); /* For x86, compiler barrier is sufficient. */
-	assert(cbin->avail[ncached + n_items - 1]);
-	assert((state & ACACHE_NCACHED_MASK) <=
-	    arena_cache_bin_info[binind].ncached_max);
 
 	if (binind < opt_acache_bypass) {
 		if (cbin->last_thd == tsdn) {
@@ -2183,8 +2262,27 @@ arena_cache_dalloc(tsdn_t *tsdn, arena_t *arena, void **items,
 		}
 	}
 
+        /*
+	 * Do the memcpy, then release the bitlock & update ncached in a single
+	 * store.
+	 */
+	/* memcpy(&cbin->avail[ncached], items, sizeof(void *) * n_items); */
+	/* cc_barrier(); /\* For x86, compiler barrier is sufficient. *\/ */
+	/* assert(cbin->avail[ncached + n_items - 1]); */
+	/* assert((state & ACACHE_NCACHED_MASK) <= */
+	/*     arena_cache_bin_info[binind].ncached_max); */
+
 	/* Release the bitlock, and adjust ncached. */
-	cbin_unlock(cbin, cbin_state_adjust(state, n_items, false));
+	/* cbin_unlock(cbin, cbin_state_adjust(state, n_items, false)); */
+
+        new_state = cbin_state_adjust(state, n_items, false);
+        if (!rseq_finish_memcpy(&rseq_lock,
+                           &cbin->avail[ncached], items,
+                           sizeof(void *) * n_items,
+                           (intptr_t*)&cbin->data, (intptr_t)new_state,
+                                start)) {
+          goto label_retry;
+        }
 }
 
 #  endif /* JEMALLOC_ARENA_INLINE_B */

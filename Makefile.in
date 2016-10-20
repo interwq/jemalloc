@@ -25,7 +25,7 @@ abs_objroot := @abs_objroot@
 # Build parameters.
 CPPFLAGS := @CPPFLAGS@ -I$(srcroot)include -I$(objroot)include
 CFLAGS := @CFLAGS@
-LDFLAGS := @LDFLAGS@ --enable-shared -fPIC
+LDFLAGS := @LDFLAGS@
 EXTRA_LDFLAGS := @EXTRA_LDFLAGS@
 LIBS := @LIBS@
 RPATH_EXTRA := @RPATH_EXTRA@
