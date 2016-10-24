@@ -1,10 +1,6 @@
 #define	JEMALLOC_MUTEX_C_
 #include "jemalloc/internal/jemalloc_internal.h"
 
-#if defined(JEMALLOC_LAZY_LOCK) && !defined(_WIN32)
-#include <dlfcn.h>
-#endif
-
 #ifndef _CRT_SPINCOUNT
 #define	_CRT_SPINCOUNT 4000
 #endif
@@ -31,20 +27,15 @@ static void	pthread_create_once(void);
  */
 
 #if defined(JEMALLOC_LAZY_LOCK) && !defined(_WIN32)
-static int (*pthread_create_fptr)(pthread_t *__restrict, const pthread_attr_t *,
+extern int (*pthread_create_fptr)(pthread_t *__restrict, const pthread_attr_t *,
     void *(*)(void *), void *__restrict);
+extern void load_pthread_create_fptr(void);
 
 static void
 pthread_create_once(void)
 {
 
-	pthread_create_fptr = dlsym(RTLD_NEXT, "pthread_create");
-	if (pthread_create_fptr == NULL) {
-		malloc_write("<jemalloc>: Error in dlsym(RTLD_NEXT, "
-		    "\"pthread_create\")\n");
-		abort();
-	}
-
+	load_pthread_create_fptr();
 	isthreaded = true;
 }
 

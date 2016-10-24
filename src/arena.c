@@ -3539,7 +3539,9 @@ arena_nthreads_dec(arena_t *arena, bool internal)
 	atomic_sub_u(&arena->nthreads[internal], 1);
 }
 
-#ifdef JEMALLOC_HAVE_PTHREAD
+#if defined(JEMALLOC_HAVE_PTHREAD) && defined(JEMALLOC_HAVE_DLSYM)
+#include <dlfcn.h>
+
 int
 set_thread_affinity(int cpu)
 {
@@ -3569,6 +3571,24 @@ purge_thread_init(unsigned ind, arena_t **arena, tsdn_t **tsdn)
 	assert(*arena);
 }
 
+int (*pthread_create_fptr)(pthread_t *__restrict, const pthread_attr_t *,
+    void *(*)(void *), void *__restrict);
+
+void
+load_pthread_create_fptr(void)
+{
+
+	if (pthread_create_fptr) {
+		return;
+	}
+	pthread_create_fptr = dlsym(RTLD_NEXT, "pthread_create");
+	if (pthread_create_fptr == NULL) {
+		malloc_write("<jemalloc>: Error in dlsym(RTLD_NEXT, "
+		    "\"pthread_create\")\n");
+		abort();
+	}
+}
+
 void *
 arena_purge_thread(void *arena_ind);
 
@@ -3591,7 +3611,7 @@ purge_thread_add(tsdn_t *tsdn, unsigned n_created)
 			 * a0 purge thread will be calling pthread_create, which depends on
 			 * malloc. This means the # of assigned threads on a0 will be at least 1.
 			 */
-			if (!pthread_create(&thd, NULL, arena_purge_thread,
+			if (!pthread_create_fptr(&thd, NULL, arena_purge_thread,
 			    (void *)(uint64_t)arena->ind)) {
 				arena->purge_thread = thd;
 				n_new_thds++;
@@ -3654,6 +3674,7 @@ a0_purge_thread_create(void)
 	unsigned n_retry = 0, max_retry = 128;
 
 	assert(opt_arena_purging_thread);
+	load_pthread_create_fptr();
 	a0 = arena_get(TSDN_NULL, 0, false);
 
 	/* a0 purge thread is created during malloc_init. */

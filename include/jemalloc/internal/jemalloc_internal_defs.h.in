@@ -273,6 +273,9 @@
 /* pthread support */
 #undef JEMALLOC_HAVE_PTHREAD
 
+/* Defined if dlsym() is available */
+#undef JEMALLOC_HAVE_DLSYM
+
 /* Adaptive mutex support in pthreads. */
 #undef JEMALLOC_HAVE_PTHREAD_MUTEX_ADAPTIVE_NP
 

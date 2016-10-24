@@ -1525,7 +1525,7 @@ malloc_init_hard(void)
 		 * Need to finish init & unlock first before creating new purge
 		 * threads (pthread_create depends on malloc).
 		 */
-#ifdef JEMALLOC_HAVE_PTHREAD
+#if defined(JEMALLOC_HAVE_PTHREAD) && !defined(_WIN32)
 		if (a0_purge_thread_create())
 			return (true);
 #else

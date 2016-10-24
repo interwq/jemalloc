@@ -1264,6 +1264,16 @@ if test "x$abi" != "xpecoff" ; then
   AC_CHECK_LIB([pthread], [pthread_create], [LIBS="$LIBS -lpthread"],
                [AC_SEARCH_LIBS([pthread_create], , ,
                                AC_MSG_ERROR([libpthread is missing]))])
+  dnl Check if we have dlsym support next.
+  have_dlsym="1"
+  AC_CHECK_HEADERS([dlfcn.h],
+    AC_CHECK_FUNC([dlsym], [],
+      [AC_CHECK_LIB([dl], [dlsym], [LIBS="$LIBS -ldl"], [have_dlsym="0"])]),
+    [have_dlsym="0"])
+fi
+
+if test "x$have_dlsym" = "x1" ; then
+  AC_DEFINE([JEMALLOC_HAVE_DLSYM], [ ])
 fi
 
 CPPFLAGS="$CPPFLAGS -D_REENTRANT"
@@ -1339,14 +1349,11 @@ if test "x$enable_lazy_lock" = "x" -a "x${force_lazy_lock}" = "x1" ; then
   enable_lazy_lock="1"
 fi
 if test "x$enable_lazy_lock" = "x1" ; then
-  if test "x$abi" != "xpecoff" ; then
-    AC_CHECK_HEADERS([dlfcn.h], , [AC_MSG_ERROR([dlfcn.h is missing])])
-    AC_CHECK_FUNC([dlsym], [],
-      [AC_CHECK_LIB([dl], [dlsym], [LIBS="$LIBS -ldl"],
-                    [AC_MSG_ERROR([libdl is missing])])
-      ])
+  if test "x$have_dlsym" = "x1" ; then
+    AC_DEFINE([JEMALLOC_LAZY_LOCK], [ ])
+  else
+    AC_MSG_ERROR([Missing dlsym support: lazy-lock cannot be enabled.])
   fi
-  AC_DEFINE([JEMALLOC_LAZY_LOCK], [ ])
 else
   enable_lazy_lock="0"
 fi
