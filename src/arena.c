@@ -1522,19 +1522,29 @@ void arena_cache_gc(tsdn_t *tsdn, arena_t *arena_not_used)
 	struct rseq_state start;
         int cpu;
 
+        /* disable this for now. */
+        return;
+
 	start = rseq_start(&rseq_lock);
         cpu = rseq_cpu_at_start(start);
         arena = arena_get(tsdn, cpu, true);
 
         gc_bin = arena->acache->next_gc_bin;
-	if (!rseq_finish(&rseq_lock, (intptr_t*)&arena->acache->next_gc_bin, (intptr_t)(gc_bin + 1), start))
-          return;
 
 	cbin = &arena->acache->cbins[gc_bin];
+        if (!rseq_finish(&rseq_lock,
+                     (intptr_t*)&arena->acache->next_gc_bin,
+                     (intptr_t)((gc_bin + 1) % nhbins),
+                         start)) {
+          return;
+        }
 	state = cbin_state_get(cbin, &ncached, &low_water, &locked);
 
 	if (low_water > 0) {
+          return;
           void *to_flush[low_water];
+
+          assert(low_water <=  ncached);
           ret = cbin_alloc_to_buf(&start, cbin, to_flush, low_water);
           if (ret) {
             arena_cache_flush(tsdn, arena, &arena->bins[gc_bin], cbin, to_flush, ret,
@@ -1549,9 +1559,9 @@ void arena_cache_gc(tsdn_t *tsdn, arena_t *arena_not_used)
 	}
 
 	low_water = ncached;
-	new_state = cbin_state_pack(state, ncached, low_water, false);
-
-        rseq_finish(&rseq_lock, (intptr_t*)&cbin->data, (intptr_t)new_state, start);
+        new_state = cbin_state_pack(state, ncached, low_water, false);
+        rseq_finish(&rseq_lock,
+                    (intptr_t*)&cbin->data, (intptr_t)new_state, start);
 }
 
 void

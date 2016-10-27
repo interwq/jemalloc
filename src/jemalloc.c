@@ -1507,6 +1507,8 @@ malloc_init_hard(void)
 		return (true);
 	}
 
+        rseq_register_current_thread();
+
 	if (config_prof && prof_boot2(tsd_tsdn(tsd))) {
 		malloc_mutex_unlock(tsd_tsdn(tsd), &init_lock);
 		return (true);

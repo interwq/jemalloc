@@ -1766,14 +1766,6 @@ cbin_alloc_to_tbin(struct rseq_state* start,
 		n_alloc = ncached;
 
 	assert(tbin->ncached == 0);
-	/* Update state and low_water if necessary */
-	if (low_water <= ncached - n_alloc) {
-		new_state = cbin_state_adjust(state, -n_alloc, false);
-	} else {
-		low_water = ncached = ncached - n_alloc;
-		new_state = cbin_state_pack(state, ncached, low_water, false);
-	}
-
         /* No need to rseq_finish_memcpy here. We are copying out from the
          * percpu cache. rseq_finish will fail if the memcpy isn't valid. */
 
@@ -1781,6 +1773,13 @@ cbin_alloc_to_tbin(struct rseq_state* start,
 	memcpy(&tbin->avail[-(int)n_alloc], &cbin->avail[ncached - n_alloc],
 	    sizeof(void *) * n_alloc);
 
+        /* Update state and low_water if necessary */
+	if (low_water <= ncached - n_alloc) {
+		new_state = cbin_state_adjust(state, -n_alloc, false);
+	} else {
+		low_water = ncached = ncached - n_alloc;
+		new_state = cbin_state_pack(state, ncached, low_water, false);
+	}
 	if (!rseq_finish(&rseq_lock, (intptr_t*)&cbin->data, (intptr_t)new_state, *start)) {
 	  return 0;
         }
@@ -1810,6 +1809,11 @@ cbin_alloc_to_buf(struct rseq_state* start,
 	if (n_alloc > ncached)
 		n_alloc = ncached;
 
+        /* No need to rseq_finish_memcpy here. We are copying out from the
+         * percpu cache. rseq_finish will fail if the memcpy isn't valid. */
+
+	memcpy(buf, &cbin->avail[ncached - n_alloc],
+	    sizeof(void *) * n_alloc);
 	/* Update state and low_water if necessary */
 	if (low_water <= ncached - n_alloc) {
 		new_state = cbin_state_adjust(state, -n_alloc, false);
@@ -1817,12 +1821,6 @@ cbin_alloc_to_buf(struct rseq_state* start,
 		low_water = ncached = ncached - n_alloc;
 		new_state = cbin_state_pack(state, ncached, low_water, false);
 	}
-
-        /* No need to rseq_finish_memcpy here. We are copying out from the
-         * percpu cache. rseq_finish will fail if the memcpy isn't valid. */
-
-	memcpy(buf, &cbin->avail[ncached - n_alloc],
-	    sizeof(void *) * n_alloc);
 
 	if (!rseq_finish(&rseq_lock, (intptr_t*)&cbin->data, (intptr_t)new_state, *start)) {
 	  return 0;
