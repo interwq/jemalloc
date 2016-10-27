@@ -3624,28 +3624,38 @@ purge_thread_add(tsdn_t *tsdn, unsigned n_created)
 }
 
 static void
-periodic_purge(arena_t *arena, tsdn_t *tsdn)
+purge_thread_work(tsdn_t *tsdn, arena_t *arena, const bool acache_gc)
 {
+
+	sleep(PURGE_THREAD_INTERVAL);
+	arena_purge(tsdn, arena, false);
+	if (acache_gc) {
+		arena_cache_gc(tsdn, arena);
+	}
+}
+
+static void
+periodic_purge(tsdn_t *tsdn, arena_t *arena)
+{
+	bool acache_gc = config_acache && opt_acache;
 
 	if (arena->ind == 0) {
 		/*
 		 * In addition to purging, a0 purge thread is also responsible for
 		 * creating purge threads for new arenas.
 		 */
-		static unsigned n_purge_threads = 1;
+		unsigned n_purge_threads = 1;
 
 		while (true) {
 			if (n_purge_threads != narenas_initialized_get()) {
 				n_purge_threads += purge_thread_add(tsdn, n_purge_threads);
 				assert(n_purge_threads <= narenas_initialized_get());
 			}
-			sleep(PURGE_THREAD_INTERVAL);
-			arena_purge(tsdn, arena, false);
+			purge_thread_work(tsdn, arena, acache_gc);
 		}
 	} else {
 		while (true) {
-			sleep(PURGE_THREAD_INTERVAL);
-			arena_purge(tsdn, arena, false);
+			purge_thread_work(tsdn, arena, acache_gc);
 		}
 	}
 }
@@ -3659,7 +3669,7 @@ arena_purge_thread(void *arena_ind)
 
 	assert(ind < narenas_total_get());
 	purge_thread_init(ind, &arena, &tsdn);
-	periodic_purge(arena, tsdn);
+	periodic_purge(tsdn, arena);
 
 	not_reached();
 	return (NULL);

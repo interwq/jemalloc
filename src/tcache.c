@@ -68,7 +68,8 @@ tcache_event_hard(tsd_t *tsd, tcache_t *tcache)
 	if (tcache->next_gc_bin == nhbins)
 		tcache->next_gc_bin = 0;
 
-	if (config_acache && opt_acache) {
+        /* Also do acache gc if purge thread is not used. */
+	if (config_acache && opt_acache && !opt_arena_purging_thread) {
 		arena_cache_gc(tsd_tsdn(tsd), arena_choose(tsd, NULL));
 	}
 }
