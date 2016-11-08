@@ -1526,11 +1526,11 @@ malloc_init_hard(void)
 		 * threads (pthread_create depends on malloc).
 		 */
 #if defined(JEMALLOC_HAVE_PTHREAD) && !defined(_WIN32)
-		if (a0_purge_thread_create())
+		if (a0_purging_thread_create())
 			return (true);
 #else
 		opt_arena_purging_thread = false;
-		malloc_printf("<jemalloc>: option purge_thread currently supports pthread "
+		malloc_printf("<jemalloc>: option purging_thread currently supports pthread "
 		    "only. \n");
 		if (opt_abort)
 			abort();

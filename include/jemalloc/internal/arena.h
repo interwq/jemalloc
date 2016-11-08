@@ -43,9 +43,9 @@ typedef enum {
 	percpu_arena_mode_limit = 3
 } percpu_arena_mode_t;
 #define PERCPU_ARENA_DEFAULT percpu_arena_disable
-#define PURGE_THREAD_DEFAULT false
+#define ARENA_PURGING_THREAD_DEFAULT false
 /* # of seconds between purging. */
-#define PURGE_THREAD_INTERVAL 1
+#define ARENA_PURGING_THREAD_INTERVAL 1
 
 typedef struct arena_runs_dirty_link_s arena_runs_dirty_link_t;
 typedef struct arena_avail_links_s arena_avail_links_t;
@@ -541,7 +541,6 @@ struct arena_s {
 	/* bins is used to store trees of free regions. */
 	arena_bin_t		bins[NBINS];
 
-	pthread_t		purge_thread;
 	/* Bins in acache is dynamically sized like tcache bins. When we get rid of
 	 * runs_avail (last member currently), acache can be the last and doesn't have
 	 * to be a pointer. */
@@ -695,7 +694,7 @@ void	arena_prefork2(tsdn_t *tsdn, arena_t *arena);
 void	arena_prefork3(tsdn_t *tsdn, arena_t *arena);
 void	arena_postfork_parent(tsdn_t *tsdn, arena_t *arena);
 void	arena_postfork_child(tsdn_t *tsdn, arena_t *arena);
-bool	a0_purge_thread_create(void);
+bool	a0_purging_thread_create(void);
 
 
 #endif /* JEMALLOC_H_EXTERNS */

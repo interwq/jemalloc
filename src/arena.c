@@ -11,7 +11,7 @@ unsigned opt_acache_size_ratio = ACACHE_SIZE_RATIO_DEFAULT;
 unsigned opt_acache_bypass = ACACHE_BYPASS_IND_DEFAULT;
 
 unsigned	opt_percpu_arena = PERCPU_ARENA_DEFAULT;
-bool	opt_arena_purging_thread = PURGE_THREAD_DEFAULT;
+bool	opt_arena_purging_thread = ARENA_PURGING_THREAD_DEFAULT;
 
 purge_mode_t	opt_purge = PURGE_DEFAULT;
 const char	*purge_mode_names[] = {
@@ -39,7 +39,6 @@ unsigned	nlclasses; /* Number of large size classes. */
 unsigned	nhclasses; /* Number of huge size classes. */
 static szind_t	runs_avail_bias; /* Size index for first runs_avail tree. */
 static szind_t	runs_avail_nclasses; /* Number of runs_avail trees. */
-
 
 arena_cache_bin_info_t	*arena_cache_bin_info;
 /* Total stack elms per tcache. */
@@ -3541,8 +3540,10 @@ arena_nthreads_dec(arena_t *arena, bool internal)
 
 #if defined(JEMALLOC_HAVE_PTHREAD) && defined(JEMALLOC_HAVE_DLSYM)
 #include <dlfcn.h>
+static void *
+arena_purging_thread(void *arena_ind);
 
-int
+static int
 set_thread_affinity(int cpu)
 {
 	cpu_set_t cpuset;
@@ -3553,11 +3554,12 @@ set_thread_affinity(int cpu)
 }
 
 static void
-purge_thread_init(unsigned ind, arena_t **arena, tsdn_t **tsdn)
+purging_thread_init(tsdn_t **tsdn, unsigned ind)
 {
 	tsd_t *tsd;
 
-	if (opt_percpu_arena != percpu_arena_disable && ind < ncpus) {
+	if (opt_percpu_arena != percpu_arena_disable) {
+		assert(ind < ncpus);
 		if (set_thread_affinity((int)ind)) {
 			malloc_printf("<jemalloc>: Purging thread affinity setting failure.\n");
 			if (opt_abort)
@@ -3566,9 +3568,6 @@ purge_thread_init(unsigned ind, arena_t **arena, tsdn_t **tsdn)
 	}
 	tsd = tsd_fetch();
 	*tsdn = tsd_tsdn(tsd);
-
-	*arena = arenas[ind];
-	assert(*arena);
 }
 
 int (*pthread_create_fptr)(pthread_t *__restrict, const pthread_attr_t *,
@@ -3589,34 +3588,40 @@ load_pthread_create_fptr(void)
 	}
 }
 
-void *
-arena_purge_thread(void *arena_ind);
-
+/*
+ * Detect if new purge threads are needed. At most # of CPUs threads will be
+ * created. The logic covers all cases including per cpu arenas, manually
+ * created arenas, and cases like ncpus > narenas.
+ */
 JEMALLOC_INLINE_C unsigned
-purge_thread_add(tsdn_t *tsdn, unsigned n_created)
+purging_thread_add(tsdn_t *tsdn, unsigned n_created, pthread_t *created_thds)
 {
-	unsigned n_needed, n_new_thds, i, narenas;
+	unsigned n_needed, n_new_thds, i, narenas, thd_ind, n_init;
 	arena_t *arena;
-	pthread_t thd;
 
+	/* No synchronization is needed as only a0 purging thread will call this. */
 	n_new_thds = 0;
 	narenas = narenas_total_get();
 	assert(narenas > n_created);
-	n_needed = narenas - n_created;
+	n_init = narenas_initialized_get();
+	n_needed = (n_init > ncpus ? ncpus : n_init) - n_created;
 
+	assert(n_needed);
+	/* Scan all indexes as arenas may not be created in order. */
 	for (i = 1; i < narenas; i++) {
 		arena = arena_get(tsdn, i, false);
-		if (arena && arena->purge_thread == 0) {
+		thd_ind = i % ncpus;
+		if (arena && !created_thds[thd_ind]) {
 			/*
 			 * a0 purge thread will be calling pthread_create, which depends on
 			 * malloc. This means the # of assigned threads on a0 will be at least 1.
 			 */
-			if (!pthread_create_fptr(&thd, NULL, arena_purge_thread,
-			    (void *)(uint64_t)arena->ind)) {
-				arena->purge_thread = thd;
+			if (!pthread_create_fptr(&created_thds[thd_ind], NULL,
+			    arena_purging_thread, (void *)(uint64_t)(i))) {
 				n_new_thds++;
 			}
-			if (--n_needed == 0) break;
+			if (--n_needed == 0)
+				break;
 		}
 	}
 	/* If for any reason thread creation failed, we'll retry next time. */
@@ -3624,71 +3629,83 @@ purge_thread_add(tsdn_t *tsdn, unsigned n_created)
 }
 
 static void
-purge_thread_work(tsdn_t *tsdn, arena_t *arena, const bool acache_gc)
+purging_thread_work(tsdn_t *tsdn, unsigned ind, const bool acache_gc)
 {
+	arena_t *arena;
+	unsigned i, narenas;
 
-	sleep(PURGE_THREAD_INTERVAL);
-	arena_purge(tsdn, arena, false);
-	if (acache_gc) {
-		arena_cache_gc(tsdn, arena);
+	sleep(ARENA_PURGING_THREAD_INTERVAL);
+	narenas = narenas_total_get();
+	for (i = ind; i < narenas; i += ncpus) {
+		arena = arena_get(tsdn, i, false);
+		if (!arena)
+			continue;
+
+		arena_purge(tsdn, arena, false);
+		if (acache_gc)
+			arena_cache_gc(tsdn, arena);
 	}
 }
 
 static void
-periodic_purge(tsdn_t *tsdn, arena_t *arena)
+periodic_purge(tsdn_t *tsdn, unsigned ind)
 {
 	bool acache_gc = config_acache && opt_acache;
 
-	if (arena->ind == 0) {
+	if (ind == 0 && ncpus > 1) {
 		/*
-		 * In addition to purging, a0 purge thread is also responsible for
-		 * creating purge threads for new arenas.
+		 * In addition to purging, a0 purge thread is also responsible for creating
+		 * purge threads for new arenas. Because only a single thread is launching
+		 * new purging threads, no real synchronization is needed.
 		 */
-		unsigned n_purge_threads = 1;
+		pthread_t purging_thds[ncpus];
+		unsigned n_purging_threads = 1;
 
+		memset(purging_thds, 0, sizeof(pthread_t) * ncpus);
 		while (true) {
-			if (n_purge_threads != narenas_initialized_get()) {
-				n_purge_threads += purge_thread_add(tsdn, n_purge_threads);
-				assert(n_purge_threads <= narenas_initialized_get());
+			if (n_purging_threads != narenas_initialized_get()) {
+				n_purging_threads += purging_thread_add(tsdn, n_purging_threads,
+				    purging_thds);
+				assert(n_purging_threads <= narenas_initialized_get());
+				if (n_purging_threads == ncpus) {
+					/* No more new purging threads needed. */
+					break;
+				}
 			}
-			purge_thread_work(tsdn, arena, acache_gc);
-		}
-	} else {
-		while (true) {
-			purge_thread_work(tsdn, arena, acache_gc);
+			purging_thread_work(tsdn, ind, acache_gc);
 		}
 	}
+
+	while (true)
+		purging_thread_work(tsdn, ind, acache_gc);
 }
 
-void *
-arena_purge_thread(void *arena_ind)
+static void *
+arena_purging_thread(void *purging_thd_ind)
 {
-	arena_t *arena;
 	tsdn_t *tsdn;
-	unsigned ind = (unsigned)(uintptr_t)arena_ind;
+	unsigned ind = (unsigned)(uintptr_t)purging_thd_ind;
 
-	assert(ind < narenas_total_get());
-	purge_thread_init(ind, &arena, &tsdn);
-	periodic_purge(tsdn, arena);
+	assert(ind < narenas_total_get() && ind < ncpus);
+	purging_thread_init(&tsdn, ind);
+	periodic_purge(tsdn, ind);
 
 	not_reached();
 	return (NULL);
 }
 
 bool
-a0_purge_thread_create(void)
+a0_purging_thread_create(void)
 {
 	pthread_t purge_thd;
-	arena_t *a0;
 	int ret;
 	unsigned n_retry = 0, max_retry = 128;
 
 	assert(opt_arena_purging_thread);
 	load_pthread_create_fptr();
-	a0 = arena_get(TSDN_NULL, 0, false);
 
 	/* a0 purge thread is created during malloc_init. */
-	while ((ret = pthread_create(&purge_thd, NULL, arena_purge_thread, (void *)(0)))) {
+	while ((ret = pthread_create(&purge_thd, NULL, arena_purging_thread, (void *)(0)))) {
 		/*
 		 * This normally won't happen as we are creating purge thread for a0. When
 		 * it does, it likely means the system is overloaded by a high number of
@@ -3704,7 +3721,6 @@ a0_purge_thread_create(void)
 			return (true);
 		}
 	}
-	a0->purge_thread = purge_thd;
 
 	return (false);
 }
@@ -3853,7 +3869,6 @@ arena_new(tsdn_t *tsdn, unsigned ind)
 		if (config_stats)
 			memset(&bin->stats, 0, sizeof(malloc_bin_stats_t));
 	}
-	arena->purge_thread = 0;
 
 	return (arena);
 }
