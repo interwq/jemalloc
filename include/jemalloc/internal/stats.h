@@ -128,6 +128,7 @@ typedef struct arena_stats_s {
 
 	/* Number of bytes currently mapped, excluding retained memory. */
 	atomic_zu_t		mapped; /* Partially derived. */
+	atomic_zu_t		mapped_max; /* Partially derived. */
 
 	/*
 	 * Number of unused virtual memory bytes currently retained.  Retained

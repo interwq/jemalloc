@@ -403,7 +403,7 @@ stats_arena_print(void (*write_cb)(void *, const char *), void *cbopaque,
 	unsigned nthreads;
 	const char *dss;
 	ssize_t dirty_decay_ms, muzzy_decay_ms;
-	size_t page, pactive, pdirty, pmuzzy, mapped, retained;
+	size_t page, pactive, pdirty, pmuzzy, mapped, mapped_max, retained;
 	size_t base, internal, resident, metadata_thp;
 	uint64_t dirty_npurge, dirty_nmadvise, dirty_purged;
 	uint64_t muzzy_npurge, muzzy_nmadvise, muzzy_purged;

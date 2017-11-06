@@ -8,6 +8,7 @@
 #include "jemalloc/internal/mutex.h"
 #include "jemalloc/internal/rtree.h"
 #include "jemalloc/internal/size_classes.h"
+#include "jemalloc/internal/spin.h"
 #include "jemalloc/internal/util.h"
 
 /******************************************************************************/
@@ -204,10 +205,38 @@ arena_stats_large_nrequests_add(tsdn_t *tsdn, arena_stats_t *arena_stats,
 	arena_stats_unlock(tsdn, arena_stats);
 }
 
+static void
+arena_stats_mapped_update_max(tsdn_t *tsdn, arena_stats_t *arena_stats) {
+#ifdef JEMALLOC_ATOMIC_U64
+	spin_t spinner = SPIN_INITIALIZER;
+	size_t cur_mapped;
+	size_t cur_max = atomic_load_zu(&arena_stats->mapped_max,
+	    ATOMIC_RELAXED);	
+	while (cur_max < (cur_mapped = atomic_load_zu(&arena_stats->mapped,
+	    ATOMIC_RELAXED))) {
+		if (atomic_compare_exchange_weak_zu(&arena_stats->mapped_max,
+		    &cur_max, cur_mapped, ATOMIC_RELAXED, ATOMIC_RELAXED)) {
+			break;
+		}
+		spin_adaptive(&spinner);
+	}
+#else
+	malloc_mutex_assert_owner(tsdn, &arena_stats->mtx);
+	size_t cur_mapped, cur_max;
+	cur_mapped = atomic_load_zu(&arena_stats->mapped, ATOMIC_RELAXED);
+	cur_max = atomic_load_zu(arena_stats->mapped_max, ATOMIC_RELAXED);
+	if (cur_max < cur_mapped) {
+		atomic_store_zu(&arena_stats->mapped_max, cur_mapped,
+		    ATOMIC_RELAXED);
+	}
+#endif
+}
+
 void
 arena_stats_mapped_add(tsdn_t *tsdn, arena_stats_t *arena_stats, size_t size) {
 	arena_stats_lock(tsdn, arena_stats);
 	arena_stats_add_zu(tsdn, arena_stats, &arena_stats->mapped, size);
+	arena_stats_mapped_update_max(tsdn, arena_stats);
 	arena_stats_unlock(tsdn, arena_stats);
 }
 
@@ -242,6 +271,11 @@ arena_stats_merge(tsdn_t *tsdn, arena_t *arena, unsigned *nthreads,
 
 	arena_stats_accum_zu(&astats->mapped, base_mapped
 	    + arena_stats_read_zu(tsdn, &arena->stats, &arena->stats.mapped));
+	/* Simply add up since the base mapped increases monotonically.  This is not strictly the max, however */
+	arena_stats_accum_zu(&astats->mapped_max, base_mapped
+	    + arena_stats_read_zu(tsdn, &arena->stats,
+	    &arena->stats.mapped_max));
+
 	arena_stats_accum_zu(&astats->retained,
 	    extents_npages_get(&arena->extents_retained) << LG_PAGE);
 
