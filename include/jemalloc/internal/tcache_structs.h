@@ -58,4 +58,16 @@ struct tcaches_s {
 	};
 };
 
+struct scache_item_s {
+	atomic_p_t bitmap;
+	unsigned nfree;//TODO
+};
+typedef struct scache_item_s scache_item_t;
+
+#define N_EXTENTS_SCACHE 8
+struct scache_s {
+	scache_item_t items[N_EXTENTS_SCACHE];
+
+};
+typedef struct scache_s scache_t;
 #endif /* JEMALLOC_INTERNAL_TCACHE_STRUCTS_H */

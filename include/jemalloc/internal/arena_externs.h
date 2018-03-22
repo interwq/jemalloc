@@ -2,6 +2,7 @@
 #define JEMALLOC_INTERNAL_ARENA_EXTERNS_H
 
 #include "jemalloc/internal/bin.h"
+#include "jemalloc/internal/div.h"
 #include "jemalloc/internal/extent_dss.h"
 #include "jemalloc/internal/pages.h"
 #include "jemalloc/internal/size_classes.h"
@@ -15,6 +16,8 @@ extern const char *percpu_arena_mode_names[];
 
 extern const uint64_t h_steps[SMOOTHSTEP_NSTEPS];
 extern malloc_mutex_t arenas_lock;
+
+extern div_info_t arena_binind_div_info[NBINS];
 
 void arena_basic_stats_merge(tsdn_t *tsdn, arena_t *arena,
     unsigned *nthreads, const char **dss, ssize_t *dirty_decay_ms,
@@ -59,6 +62,9 @@ void *arena_palloc(tsdn_t *tsdn, arena_t *arena, size_t usize,
 void arena_prof_promote(tsdn_t *tsdn, const void *ptr, size_t usize);
 void arena_dalloc_promoted(tsdn_t *tsdn, void *ptr, tcache_t *tcache,
     bool slow_path);
+void arena_dalloc_bin_batch_junked_locked(tsdn_t *tsdn, arena_t *arena,
+    extent_t *slab, szind_t binind, size_t n_items, bitmap_t *batch,
+    size_t bitmap_ngroups);
 void arena_dalloc_bin_junked_locked(tsdn_t *tsdn, arena_t *arena,
     extent_t *extent, void *ptr);
 void arena_dalloc_small(tsdn_t *tsdn, void *ptr);

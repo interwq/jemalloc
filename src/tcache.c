@@ -3,6 +3,7 @@
 #include "jemalloc/internal/jemalloc_internal_includes.h"
 
 #include "jemalloc/internal/assert.h"
+#include "jemalloc/internal/div.h"
 #include "jemalloc/internal/mutex.h"
 #include "jemalloc/internal/size_classes.h"
 
@@ -104,7 +105,6 @@ void
 tcache_bin_flush_small(tsd_t *tsd, tcache_t *tcache, cache_bin_t *tbin,
     szind_t binind, unsigned rem) {
 	bool merged_stats = false;
-
 	assert(binind < NBINS);
 	assert((cache_bin_sz_t)rem <= tbin->ncached);
 
@@ -180,6 +180,142 @@ tcache_bin_flush_small(tsd_t *tsd, tcache_t *tcache, cache_bin_t *tbin,
 	memmove(tbin->avail - rem, tbin->avail - tbin->ncached, rem *
 	    sizeof(void *));
 	tbin->ncached = rem;
+	if (tbin->ncached < tbin->low_water) {
+		tbin->low_water = tbin->ncached;
+	}
+}
+
+void
+tcache_bin_full_flush_small(tsd_t *tsd, tcache_t *tcache, cache_bin_t *tbin,
+    szind_t binind) {
+#define MAX_NUM_EXTENTS_FLUSH 4
+	cache_bin_info_t *bin_info = &tcache_bin_info[binind];
+	assert(binind < NBINS);
+	assert(tbin->ncached == bin_info->ncached_max);
+	if (bin_infos[binind].nregs < 4) {
+		tcache_bin_flush_small(tsd, tcache, tbin, binind,
+		    (bin_info->ncached_max >> 1));
+		return;
+	}
+
+	if (bin_infos[binind].slab_size < (bin_infos[binind].nregs >> 3)) {
+		tcache_bin_flush_small(tsd, tcache, tbin, binind,
+		    (bin_info->ncached_max >> 1));
+		return;
+	}
+
+	int ncached = tbin->ncached;
+	void **next = tbin->avail - 1;
+	void **last = tbin->avail - ncached;
+	size_t bitmap_ngroups = bin_infos[binind].bitmap_info.ngroups;
+
+	struct {
+		void *base;
+		void *end;
+		arena_t *arena;
+		extent_t *extent;
+		size_t n_items;
+		bitmap_t bitmap[bitmap_ngroups];
+	} extents_flush[MAX_NUM_EXTENTS_FLUSH];
+	assert(ncached > MAX_NUM_EXTENTS_FLUSH);
+	for (unsigned i = 0; i < MAX_NUM_EXTENTS_FLUSH; i++) {
+		void *ptr = *(tbin->avail - 1 -
+		    i * (ncached / MAX_NUM_EXTENTS_FLUSH));
+		extent_t *extent = iealloc(tsd_tsdn(tsd), ptr);
+		extents_flush[i].arena = extent_arena_get(extent);
+		extents_flush[i].extent = extent;
+		extents_flush[i].base = extent_addr_get(extent);
+		extents_flush[i].end = extents_flush[i].base
+		    + bin_infos[binind].slab_size;
+		extents_flush[i].n_items = 0;
+		memset(extents_flush[i].bitmap, 0,
+		    sizeof(extents_flush[i].bitmap));
+	}
+
+	int n_left = 0;
+	while (next >= last) {
+		void *ptr = *(next--);
+		unsigned i, found;
+		for (i = 0; i < MAX_NUM_EXTENTS_FLUSH; i++) {
+			if (ptr >= extents_flush[i].base &&
+			    ptr < extents_flush[i].end) {
+				found = i;
+				break;
+			}
+		}
+		if (i == MAX_NUM_EXTENTS_FLUSH) {
+			*(tbin->avail - ++n_left) = ptr;
+			continue;
+		}
+		szind_t regind = div_compute(
+			&arena_binind_div_info[binind], (uintptr_t)ptr -
+			(uintptr_t)extents_flush[found].base);
+		assert(regind < bin_infos[binind].nregs);
+		bitmap_unset(extents_flush[found].bitmap,
+		    &bin_infos[binind].bitmap_info, regind);
+		extents_flush[found].n_items++;
+	}
+	assert(tbin->ncached >= n_left + MAX_NUM_EXTENTS_FLUSH);
+	
+	arena_t *arena = tcache->arena;
+	assert(arena != NULL);
+	bool merged_stats = false;
+	for (unsigned i = 0; i < MAX_NUM_EXTENTS_FLUSH; i++) {
+		assert(extents_flush[i].n_items <= bin_infos[binind].nregs);
+		if (extents_flush[i].n_items == 0) {
+			continue;
+		}
+
+		arena_t *bin_arena = extents_flush[i].arena;
+		if (config_prof && bin_arena == arena && !merged_stats) {
+			if (arena_prof_accum(tsd_tsdn(tsd), arena,
+			    tcache->prof_accumbytes)) {
+				prof_idump(tsd_tsdn(tsd));
+			}
+			tcache->prof_accumbytes = 0;
+		}
+
+		bin_t *bin = &bin_arena->bins[binind];
+		malloc_mutex_lock(tsd_tsdn(tsd), &bin->lock);
+		if (config_stats && bin_arena == arena) {
+			assert(!merged_stats);
+			merged_stats = true;
+			bin->stats.nflushes++;
+			bin->stats.nrequests += tbin->tstats.nrequests;
+			tbin->tstats.nrequests = 0;
+		}
+		unsigned flushed = 0;
+		for (unsigned j = i; j < MAX_NUM_EXTENTS_FLUSH; j++) {
+			if (extents_flush[j].arena != bin_arena ||
+			    extents_flush[j].n_items == 0) {
+				continue;
+			}
+			unsigned n_items = extents_flush[j].n_items;
+			arena_dalloc_bin_batch_junked_locked(
+			    tsd_tsdn(tsd), bin_arena, extents_flush[j].extent,
+			    binind, n_items, extents_flush[j].bitmap,
+			    bitmap_ngroups);
+			flushed += n_items;
+			extents_flush[j].n_items = 0;
+		}
+		malloc_mutex_unlock(tsd_tsdn(tsd), &bin->lock);
+		arena_decay_ticks(tsd_tsdn(tsd), bin_arena, flushed);
+	}
+
+	if (config_stats && !merged_stats) {
+		/*
+		 * The flush loop didn't happen to flush to this thread's
+		 * arena, so the stats didn't get merged.  Manually do so now.
+		 */
+		bin_t *bin = &arena->bins[binind];
+		malloc_mutex_lock(tsd_tsdn(tsd), &bin->lock);
+		bin->stats.nflushes++;
+		bin->stats.nrequests += tbin->tstats.nrequests;
+		tbin->tstats.nrequests = 0;
+		malloc_mutex_unlock(tsd_tsdn(tsd), &bin->lock);
+	}
+	tbin->ncached = n_left;
+
 	if (tbin->ncached < tbin->low_water) {
 		tbin->low_water = tbin->ncached;
 	}

@@ -163,20 +163,15 @@ tcache_alloc_large(tsd_t *tsd, arena_t *arena, tcache_t *tcache, size_t size,
 JEMALLOC_ALWAYS_INLINE void
 tcache_dalloc_small(tsd_t *tsd, tcache_t *tcache, void *ptr, szind_t binind,
     bool slow_path) {
-	cache_bin_t *bin;
-	cache_bin_info_t *bin_info;
-
 	assert(tcache_salloc(tsd_tsdn(tsd), ptr) <= SMALL_MAXCLASS);
-
 	if (slow_path && config_fill && unlikely(opt_junk_free)) {
 		arena_dalloc_junk_small(ptr, &bin_infos[binind]);
 	}
 
-	bin = tcache_small_bin_get(tcache, binind);
-	bin_info = &tcache_bin_info[binind];
+	cache_bin_t *bin = tcache_small_bin_get(tcache, binind);
+	cache_bin_info_t *bin_info = &tcache_bin_info[binind];
 	if (unlikely(bin->ncached == bin_info->ncached_max)) {
-		tcache_bin_flush_small(tsd, tcache, bin, binind,
-		    (bin_info->ncached_max >> 1));
+		tcache_bin_full_flush_small(tsd, tcache, bin, binind);
 	}
 	assert(bin->ncached < bin_info->ncached_max);
 	bin->ncached++;
