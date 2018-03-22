@@ -40,7 +40,7 @@ const uint64_t h_steps[SMOOTHSTEP_NSTEPS] = {
 #undef STEP
 };
 
-static div_info_t arena_binind_div_info[NBINS];
+div_info_t arena_binind_div_info[NBINS];
 
 /******************************************************************************/
 /*
@@ -1550,6 +1550,35 @@ arena_dalloc_bin_locked_impl(tsdn_t *tsdn, arena_t *arena, extent_t *slab,
 	if (config_stats) {
 		bin->stats.ndalloc++;
 		bin->stats.curregs--;
+	}
+}
+
+void
+arena_dalloc_bin_batch_junked_locked(tsdn_t *tsdn, arena_t *arena,
+    extent_t *slab, szind_t binind, size_t n_items, bitmap_t *batch, size_t bitmap_ngroups) {
+	const bin_info_t *bin_info = &bin_infos[binind];
+	assert(extent_nfree_get(slab) + n_items <= bin_info->nregs);
+
+	arena_slab_data_t *slab_data = extent_slab_data_get(slab);
+	bitmap_unset_batch(slab_data->bitmap, &bin_info->bitmap_info, batch,
+	    0, bitmap_ngroups);
+	unsigned nfree_old = extent_nfree_get(slab);
+	extent_nfree_add(slab, n_items);
+
+	bin_t *bin = &arena->bins[binind];
+	unsigned nfree_new = extent_nfree_get(slab);
+	if (nfree_old == 0 && bin_info->nregs > 1 && slab != bin->slabcur) {
+		arena_bin_slabs_full_remove(arena, bin, slab);
+		arena_bin_lower_slab(tsdn, arena, slab, bin);
+	}
+	if (nfree_new == bin_info->nregs) {
+		arena_dissociate_bin_slab(arena, slab, bin);
+		arena_dalloc_bin_slab(tsdn, arena, slab, bin);
+	}
+
+	if (config_stats) {
+		bin->stats.ndalloc += n_items;
+		bin->stats.curregs -= n_items;
 	}
 }
 

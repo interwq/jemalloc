@@ -247,6 +247,12 @@ extent_nfree_set(extent_t *extent, unsigned nfree) {
 }
 
 static inline void
+extent_nfree_add(extent_t *extent, size_t n) {
+	assert(extent_slab_get(extent));
+	extent->e_bits += ((uint64_t)n << EXTENT_BITS_NFREE_SHIFT);
+}
+
+static inline void
 extent_nfree_inc(extent_t *extent) {
 	assert(extent_slab_get(extent));
 	extent->e_bits += ((uint64_t)1U << EXTENT_BITS_NFREE_SHIFT);

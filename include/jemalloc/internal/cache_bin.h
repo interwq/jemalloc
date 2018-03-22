@@ -38,6 +38,8 @@ typedef struct cache_bin_info_s cache_bin_info_t;
 struct cache_bin_info_s {
 	/* Upper limit on ncached. */
 	cache_bin_sz_t ncached_max;
+	/* TBD */
+	void *offset_table;
 };
 
 typedef struct cache_bin_s cache_bin_t;

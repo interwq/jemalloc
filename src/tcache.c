@@ -3,6 +3,7 @@
 #include "jemalloc/internal/jemalloc_internal_includes.h"
 
 #include "jemalloc/internal/assert.h"
+#include "jemalloc/internal/div.h"
 #include "jemalloc/internal/mutex.h"
 #include "jemalloc/internal/size_classes.h"
 
@@ -100,6 +101,31 @@ tcache_alloc_small_hard(tsdn_t *tsdn, arena_t *arena, tcache_t *tcache,
 	return ret;
 }
 
+void *
+find_base(void *ptr, szind_t binind) {
+	size_t base = (size_t)ptr & ~PAGE_MASK;
+	if (base != (uintptr_t)ptr &&
+	    tcache_bin_info[binind].offset_table != NULL) {
+		size_t offset = ((size_t)ptr & PAGE_MASK) %
+		    bin_infos[binind].reg_size;
+		if (offset != 0) {
+			size_t npages = bin_infos[binind].slab_size >> LG_PAGE;
+			uint16_t *table = tcache_bin_info[binind].offset_table;
+			assert(npages > 1);
+			unsigned i;
+			for (i = 0; i < npages - 1; i++) {
+				if (table[i] == offset) {
+					break;
+				}
+			}
+			assert(table[i] == offset);
+			base -= (i + 1) * PAGE;
+		}
+	}
+
+	return (void *)base;
+}
+
 void
 tcache_bin_flush_small(tsd_t *tsd, tcache_t *tcache, cache_bin_t *tbin,
     szind_t binind, unsigned rem) {
@@ -110,20 +136,47 @@ tcache_bin_flush_small(tsd_t *tsd, tcache_t *tcache, cache_bin_t *tbin,
 
 	arena_t *arena = tcache->arena;
 	assert(arena != NULL);
-	unsigned nflush = tbin->ncached - rem;
-	VARIABLE_ARRAY(extent_t *, item_extent, nflush);
-	/* Look up extent once per item. */
-	for (unsigned i = 0 ; i < nflush; i++) {
-		item_extent[i] = iealloc(tsd_tsdn(tsd), *(tbin->avail - 1 - i));
-	}
 
-	while (nflush > 0) {
-		/* Lock the arena bin associated with the first object. */
-		extent_t *extent = item_extent[0];
+	size_t bitmap_ngroups;
+	bitmap_ngroups = bin_infos[binind].bitmap_info.ngroups;
+
+	int ncached = tbin->ncached;
+	my_qsort(tbin->avail - ncached, ncached, sizeof(void *), compare);
+
+	int nflushed = 0;
+	void **next = tbin->avail - 1;
+	void **target = next - (ncached - rem);
+	void **last = tbin->avail - ncached;
+	while (next > target) {
+		assert(nflushed < (int)(ncached - rem));
+		void *ptr = *next;
+		extent_t *extent = iealloc(tsd_tsdn(tsd), ptr);
+		void *base = extent_addr_get(extent);//find_base(ptr, binind);
+		void *end = base + bin_infos[binind].slab_size;
+
+		VARIABLE_ARRAY(bitmap_t, bitmap, bitmap_ngroups);
+		for (unsigned i = 0; i < bitmap_ngroups; i++) {
+			bitmap[i] = 0;
+		}
+
+		void **first = next;
+		do {
+			assert(ptr <= *first);
+			szind_t regind = div_compute(
+			    &arena_binind_div_info[binind], (uintptr_t)ptr -
+			    (uintptr_t)base);
+			assert(regind < bin_infos[binind].nregs);
+			bitmap_unset(bitmap, &bin_infos[binind].bitmap_info,
+			    regind);
+			ptr = *(--next);
+		} while (ptr >= base && ptr < end && next >= last);
+		size_t n_items = ((uintptr_t)first - (uintptr_t)next)
+		    >> LG_SIZEOF_PTR;
+
 		arena_t *bin_arena = extent_arena_get(extent);
 		bin_t *bin = &bin_arena->bins[binind];
 
-		if (config_prof && bin_arena == arena) {
+		if (config_prof && bin_arena == arena && !merged_stats) {
 			if (arena_prof_accum(tsd_tsdn(tsd), arena,
 			    tcache->prof_accumbytes)) {
 				prof_idump(tsd_tsdn(tsd));
@@ -132,38 +185,23 @@ tcache_bin_flush_small(tsd_t *tsd, tcache_t *tcache, cache_bin_t *tbin,
 		}
 
 		malloc_mutex_lock(tsd_tsdn(tsd), &bin->lock);
-		if (config_stats && bin_arena == arena) {
-			assert(!merged_stats);
+		if (config_stats && bin_arena == arena && !merged_stats) {
 			merged_stats = true;
 			bin->stats.nflushes++;
 			bin->stats.nrequests += tbin->tstats.nrequests;
 			tbin->tstats.nrequests = 0;
 		}
-		unsigned ndeferred = 0;
-		for (unsigned i = 0; i < nflush; i++) {
-			void *ptr = *(tbin->avail - 1 - i);
-			extent = item_extent[i];
-			assert(ptr != NULL && extent != NULL);
-
-			if (extent_arena_get(extent) == bin_arena) {
-				arena_dalloc_bin_junked_locked(tsd_tsdn(tsd),
-				    bin_arena, extent, ptr);
-			} else {
-				/*
-				 * This object was allocated via a different
-				 * arena bin than the one that is currently
-				 * locked.  Stash the object, so that it can be
-				 * handled in a future pass.
-				 */
-				*(tbin->avail - 1 - ndeferred) = ptr;
-				item_extent[ndeferred] = extent;
-				ndeferred++;
-			}
-		}
+		arena_dalloc_bin_batch_junked_locked(
+		    tsd_tsdn(tsd), bin_arena, extent, binind, n_items, bitmap,
+		    bitmap_ngroups);
 		malloc_mutex_unlock(tsd_tsdn(tsd), &bin->lock);
-		arena_decay_ticks(tsd_tsdn(tsd), bin_arena, nflush - ndeferred);
-		nflush = ndeferred;
+
+		arena_decay_ticks(tsd_tsdn(tsd), bin_arena, n_items);
+		nflushed += n_items;
+		assert((int)nflushed <= ncached);
 	}
+
+	/////////////////////////////////
 	if (config_stats && !merged_stats) {
 		/*
 		 * The flush loop didn't happen to flush to this thread's
@@ -177,9 +215,12 @@ tcache_bin_flush_small(tsd_t *tsd, tcache_t *tcache, cache_bin_t *tbin,
 		malloc_mutex_unlock(tsd_tsdn(tsd), &bin->lock);
 	}
 
-	memmove(tbin->avail - rem, tbin->avail - tbin->ncached, rem *
-	    sizeof(void *));
-	tbin->ncached = rem;
+	unsigned left = ncached - nflushed;
+	assert(next == tbin->avail - nflushed - 1);
+	memmove(tbin->avail - left, tbin->avail - ncached, left *
+           sizeof(void *));
+	tbin->ncached = left;
+
 	if (tbin->ncached < tbin->low_water) {
 		tbin->low_water = tbin->ncached;
 	}
@@ -665,14 +706,26 @@ tcache_boot(tsdn_t *tsdn) {
 
 	nhbins = sz_size2index(tcache_maxclass) + 1;
 
+	size_t cache_bin_info_size = nhbins * sizeof(cache_bin_info_t);
+	unsigned i;
+	size_t n = 0;
+	for (i = 0; i < NBINS; i++) {
+		if (bin_infos[i].reg_size % PAGE != 0) {
+			n += bin_infos[i].slab_size / PAGE - 1;
+		}
+	}
+	// what if page >> 4k?
+	size_t offset_table_size = n * sizeof(uint16_t);
+
 	/* Initialize tcache_bin_info. */
-	tcache_bin_info = (cache_bin_info_t *)base_alloc(tsdn, b0get(), nhbins
-	    * sizeof(cache_bin_info_t), CACHELINE);
+	tcache_bin_info = (cache_bin_info_t *)base_alloc(tsdn, b0get(),
+	    cache_bin_info_size + offset_table_size, CACHELINE);
 	if (tcache_bin_info == NULL) {
 		return true;
 	}
+	void *offset_table = (void *)((uintptr_t)tcache_bin_info +
+	    cache_bin_info_size);
 	stack_nelms = 0;
-	unsigned i;
 	for (i = 0; i < NBINS; i++) {
 		if ((bin_infos[i].nregs << 1) <= TCACHE_NSLOTS_SMALL_MIN) {
 			tcache_bin_info[i].ncached_max =
@@ -686,7 +739,24 @@ tcache_boot(tsdn_t *tsdn) {
 			    TCACHE_NSLOTS_SMALL_MAX;
 		}
 		stack_nelms += tcache_bin_info[i].ncached_max;
+		if (bin_infos[i].reg_size % PAGE != 0) {
+			size_t slab_npages = bin_infos[i].slab_size / PAGE;
+			assert(slab_npages > 0);
+			tcache_bin_info[i].offset_table = offset_table;
+			uint16_t *table = tcache_bin_info[i].offset_table;
+			for (unsigned j = 0; j < slab_npages - 1; j++) {
+				table[j] = bin_infos[i].reg_size -
+				    ((j + 1) * PAGE % bin_infos[i].reg_size);
+				assert(table[j] > 0);
+			}
+			offset_table = (void *)((uintptr_t)offset_table +
+			    (slab_npages - 1) * sizeof(uint16_t));
+		} else {
+			tcache_bin_info[i].offset_table = NULL;
+		}
 	}
+	assert((uintptr_t)offset_table == (uintptr_t)tcache_bin_info +
+	    cache_bin_info_size + offset_table_size);
 	for (; i < nhbins; i++) {
 		tcache_bin_info[i].ncached_max = TCACHE_NSLOTS_LARGE;
 		stack_nelms += tcache_bin_info[i].ncached_max;
