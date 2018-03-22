@@ -366,4 +366,17 @@ bitmap_unset(bitmap_t *bitmap, const bitmap_info_t *binfo, size_t bit) {
 #endif /* BITMAP_USE_TREE */
 }
 
+static inline void
+bitmap_unset_batch(bitmap_t *bitmap, const bitmap_info_t *binfo,
+		   bitmap_t *batch, size_t begin_group, size_t end_group) {
+#ifdef BITMAP_USE_TREE
+	abort();
+#endif	
+	assert(end_group <= binfo->ngroups);
+	for (unsigned i = begin_group; i < end_group; i++) {
+		assert((bitmap[i] & batch[i]) == 0);
+		bitmap[i] |= batch[i];
+	}
+}
+
 #endif /* JEMALLOC_INTERNAL_BITMAP_H */
