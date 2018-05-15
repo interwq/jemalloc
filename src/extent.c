@@ -1393,6 +1393,8 @@ extent_alloc_retained(tsdn_t *tsdn, arena_t *arena,
 	assert(size != 0);
 	assert(alignment != 0);
 
+	bool tried_merge = false;
+retry_alloc_retained:
 	malloc_mutex_lock(tsdn, &arena->extent_grow_mtx);
 
 	extent_t *extent = extent_recycle(tsdn, arena, r_extent_hooks,
@@ -1404,6 +1406,25 @@ extent_alloc_retained(tsdn_t *tsdn, arena_t *arena,
 			extent_gdump_add(tsdn, extent);
 		}
 	} else if (opt_retain && new_addr == NULL) {
+		if (!tried_merge) {
+			tried_merge = true;
+			bool should_merge;
+			if (extents_npages_get(&arena->extents_dirty) +
+			    extents_npages_get(&arena->extents_muzzy) +
+			    extents_npages_get(&arena->extents_retained)
+			    >= size) {
+				should_merge = true;
+			} else {
+				should_merge = false;
+			}
+			// flush and retry
+			if (should_merge) {
+				malloc_mutex_unlock(tsdn,
+				    &arena->extent_grow_mtx);
+				arena_decay(tsdn, arena, false, true);
+				goto retry_alloc_retained;
+			}
+		}
 		extent = extent_grow_retained(tsdn, arena, r_extent_hooks, size,
 		    pad, alignment, slab, szind, zero, commit);
 		/* extent_grow_retained() always releases extent_grow_mtx. */
