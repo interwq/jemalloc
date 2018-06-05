@@ -294,7 +294,7 @@ arena_set(unsigned ind, arena_t *arena) {
 	atomic_store_p(&arenas[ind], arena, ATOMIC_RELEASE);
 }
 
-static void
+void
 narenas_total_set(unsigned narenas) {
 	atomic_store_u(&narenas_total, narenas, ATOMIC_RELEASE);
 }

@@ -40,6 +40,7 @@ void *bootstrap_malloc(size_t size);
 void *bootstrap_calloc(size_t num, size_t size);
 void bootstrap_free(void *ptr);
 void arena_set(unsigned ind, arena_t *arena);
+void narenas_total_set(unsigned narenas);
 unsigned narenas_total_get(void);
 arena_t *arena_init(tsdn_t *tsdn, unsigned ind, extent_hooks_t *extent_hooks);
 arena_tdata_t *arena_tdata_get_hard(tsd_t *tsd, unsigned ind);

@@ -84,6 +84,7 @@ size_t arena_extent_sn_next(arena_t *arena);
 arena_t *arena_new(tsdn_t *tsdn, unsigned ind, extent_hooks_t *extent_hooks);
 bool arena_init_huge(void);
 arena_t *arena_choose_huge(tsd_t *tsd);
+arena_t *arena_choose_large(tsd_t *tsd, arena_t *arena);
 void arena_boot(void);
 void arena_prefork0(tsdn_t *tsdn, arena_t *arena);
 void arena_prefork1(tsdn_t *tsdn, arena_t *arena);

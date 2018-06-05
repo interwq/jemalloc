@@ -19,10 +19,16 @@ arena_choose_maybe_huge(tsd_t *tsd, arena_t *arena, size_t size) {
 	 * 1) is using auto arena selection (i.e. arena == NULL), and 2) the
 	 * thread is not assigned to a manual arena.
 	 */
-	if (unlikely(size >= huge_threshold)) {
+	if (size >= LARGE_MINCLASS) {
 		arena_t *tsd_arena = tsd_arena_get(tsd);
-		if (tsd_arena == NULL || arena_is_auto(tsd_arena)) {
-			return arena_choose_huge(tsd);
+		if (unlikely(size >= huge_threshold)) {
+			if (tsd_arena == NULL || arena_is_auto(tsd_arena)) {
+				return arena_choose_huge(tsd);
+			}
+		} else {
+			if (tsd_arena == NULL || arena_is_auto(tsd_arena)) {
+				return arena_choose_large(tsd, arena);
+			}
 		}
 	}
 

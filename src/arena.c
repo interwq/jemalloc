@@ -46,6 +46,7 @@ size_t opt_huge_threshold = HUGE_THRESHOLD_DEFAULT;
 size_t huge_threshold = HUGE_THRESHOLD_DEFAULT;
 static unsigned huge_arena_ind;
 
+static unsigned large_arena_base;
 /******************************************************************************/
 /*
  * Function prototypes for static functions that are referenced prior to
@@ -1946,6 +1947,46 @@ arena_choose_huge(tsd_t *tsd) {
 	return huge_arena;
 }
 
+#define LARGE_NARENA_SHIFT 1
+
+arena_t *
+arena_choose_large(tsd_t *tsd, arena_t *arena) {
+	if (large_arena_base == 0) {
+		assert(!malloc_initialized());
+	}
+
+	/*
+	if (arena == NULL) {
+		arena = arena_choose(tsd, NULL);
+		if (unlikely(arena == NULL)) {
+			return NULL;
+		}
+	}
+	if (!arena_is_auto(arena)) {
+		return arena;
+	}
+
+	unsigned ind = large_arena_base +
+	    (arena_ind_get(arena) >> LARGE_NARENA_SHIFT);
+	*/
+	unsigned ind = (malloc_getcpu() >> LARGE_NARENA_SHIFT)
+	    + large_arena_base;
+	assert(ind < narenas_total_get());
+	arena_t *large_arena = arena_get(tsd_tsdn(tsd), ind, false);
+	if (unlikely(large_arena == NULL)) {
+		/* Create the large arena on demand. */
+		if (large_arena_base == 0) {
+			ind = 0;
+		}
+		large_arena = arena_get(tsd_tsdn(tsd), ind, true);
+		if (large_arena == NULL) {
+			return NULL;
+		}
+	}
+
+	return large_arena;
+}
+
 bool
 arena_init_huge(void) {
 	bool huge_enabled;
@@ -1957,6 +1998,11 @@ arena_init_huge(void) {
 		huge_threshold = LARGE_MAXCLASS + PAGE;
 		huge_enabled = false;
 	} else {
+		// fixme
+		large_arena_base = narenas_total_get();
+		narenas_total_set(large_arena_base +
+		    (ncpus >> LARGE_NARENA_SHIFT));
+		// fixme
 		/* Reserve the index for the huge arena. */
 		huge_arena_ind = narenas_total_get();
 		huge_threshold = opt_huge_threshold;
