@@ -188,6 +188,7 @@ typedef struct {
 /* Whether encountered any invalid config options. */
 static bool had_conf_error = false;
 
+auto_bins_t **auto_bins_array;
 /******************************************************************************/
 /*
  * Function prototypes for static functions that are referenced prior to
@@ -1629,6 +1630,14 @@ malloc_init_narenas(void) {
 	}
 	manual_arena_base = narenas_total_get();
 
+	auto_bins_array = base_alloc(tsd_tsdn(tsd),
+				     b0get(), narenas_total_get() *
+	    sizeof(auto_bins_t *), CACHELINE);
+
+
+	return iallocztm(TSDN_NULL, size, sz_size2index(size), zero, NULL,
+	    is_internal, arena_get(TSDN_NULL, 0, true), true);
+	
 	return false;
 }
 

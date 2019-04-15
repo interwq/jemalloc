@@ -14,6 +14,10 @@
 #include "jemalloc/internal/smoothstep.h"
 #include "jemalloc/internal/ticker.h"
 
+struct auto_bins_s {
+	bins_t			bins[SC_NBINS];
+};
+
 struct arena_decay_s {
 	/* Synchronizes all non-atomic fields. */
 	malloc_mutex_t		mtx;
