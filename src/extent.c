@@ -1691,10 +1691,21 @@ extent_record(tsdn_t *tsdn, arena_t *arena, extent_hooks_t **r_extent_hooks,
 	assert(rtree_extent_read(tsdn, &extents_rtree, rtree_ctx,
 	    (uintptr_t)extent_base_get(extent), true) == extent);
 
+	size_t extent_sz = extent_size_get(extent);
 	if (!extents->delay_coalesce) {
 		extent = extent_try_coalesce(tsdn, arena, r_extent_hooks,
 		    rtree_ctx, extents, extent, NULL, growing_retained);
-	} else if (extent_size_get(extent) >= SC_LARGE_MINCLASS) {
+	} else if ((extent_sz != PAGE) &&
+		   (extent_sz != 3 * PAGE) &&
+		   (extent_sz != 5 * PAGE) &&
+		   (extent_sz != 7 * PAGE) &&
+		   (extent_sz < SC_LARGE_MINCLASS)) {
+		bool coalesced;
+		do {
+			extent = extent_try_coalesce(tsdn, arena, r_extent_hooks,
+			    rtree_ctx, extents, extent, &coalesced, growing_retained);
+		} while (coalesced);
+	} else if (extent_sz >= SC_LARGE_MINCLASS) {
 		assert(extents == &arena->extents_dirty);
 		/* Always coalesce large extents eagerly. */
 		bool coalesced;
