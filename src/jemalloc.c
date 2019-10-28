@@ -2324,6 +2324,56 @@ malloc_default(size_t size) {
  * fastpath supports ticker and profiling, both of which will also
  * tail-call to the slowpath if they fire.
  */
+
+static void
+mprotect_tsd(void *addr, size_t padding, int flag) {
+	if (padding < PAGE) return;
+	void *base = (void *)PAGE_CEILING((uintptr_t)addr);
+	if (padding < (uintptr_t)base - (uintptr_t)addr) return;
+
+	size_t len = padding - ((uintptr_t)base - (uintptr_t)addr);
+	len -= len % PAGE;
+	int ret = mprotect(base, len, flag);
+//	malloc_printf("mprotect %p, %zu, ret %d, highest %p, lowest %p\n",
+//		      base, len, ret, highest, lowest);
+	if (ret) abort();
+}
+
+#define NALLOC_MAX (1100)
+static malloc_mutex_t pad_mtx;
+
+#define POOL_PADDING (0*1024)
+static void *buf_start = NULL, *buf_end = NULL;
+static UNUSED void *
+malloc_pool(size_t sz) {
+	tsd_t *tsd = tsd_get(false);
+
+	malloc_mutex_lock(tsd_tsdn(tsd), &pad_mtx);
+	static void *buf_cur = NULL;
+	if (buf_start == NULL) {
+		size_t buf_size = PAGE_CEILING(sz)*NALLOC_MAX;
+		buf_start = malloc_default(buf_size);
+		if ((uintptr_t)buf_start % PAGE) abort();
+		buf_end = buf_start + buf_size;
+		buf_cur = buf_start;
+	}
+	buf_cur += POOL_PADDING;
+	void *ret = buf_cur;
+	buf_cur += sz;
+
+	malloc_mutex_unlock(tsd_tsdn(tsd), &pad_mtx);
+
+	if (ret >= buf_end) abort();
+	if (POOL_PADDING > 0) mprotect_tsd(ret-POOL_PADDING, POOL_PADDING, PROT_NONE);
+
+	return ret;
+}
+
+static unsigned safe_sz = 3*1024;
+static void *ptrs[NALLOC_MAX];
+static uintptr_t highest = 0, lowest = UINT64_MAX;
+static unsigned nalloc = 0;
+
 JEMALLOC_EXPORT JEMALLOC_ALLOCATOR JEMALLOC_RESTRICT_RETURN
 void JEMALLOC_NOTHROW *
 JEMALLOC_ATTR(malloc) JEMALLOC_ALLOC_SIZE(1)
@@ -2333,6 +2383,48 @@ je_malloc(size_t size) {
 	if (tsd_get_allocates() && unlikely(!malloc_initialized())) {
 		return malloc_default(size);
 	}
+
+retry:
+	if (size == 3008) {
+//#define PAD_BEFORE (4*1024)
+#define PAD_BEFORE (16)
+		void *ret1 = malloc_default(3008 + PAD_BEFORE);
+//		void *ret2 = malloc_pool(safe_sz);
+		if (PAD_BEFORE >= PAGE) {
+			mprotect_tsd(ret1, PAD_BEFORE, PROT_NONE);
+		} else {
+			// for (unsigned i = 0; i < PAD_BEFORE; i++) {
+			// 	((char *)ret1)[i] = 'x';
+			// }
+		}
+
+		// *((void **)(ret2 + safe_sz - sizeof(void *))) = ret1;
+		// char *fill = ret1;
+		// for (unsigned n = 0; n < safe_sz; n++) {
+		// 	fill[n] = 'X';
+		// }
+		tsd_t *tsd = tsd_get(false);
+		extent_t *e = iealloc(tsd_tsdn(tsd), ret1);
+		if (ret1 - extent_base_get(e) == 0*1024) {
+			// add padding
+		} else {
+			return ret1;
+		}
+		ret1 += PAD_BEFORE;
+
+		malloc_mutex_lock(tsd_tsdn(tsd), &pad_mtx);
+		if ((uintptr_t)ret1 > highest) {
+			highest = (uintptr_t)ret1;
+		}
+		if ((uintptr_t)ret1 < lowest) {
+			lowest = (uintptr_t)ret1;
+		}
+		ptrs[nalloc++] = ret1;
+		malloc_mutex_unlock(tsd_tsdn(tsd), &pad_mtx);
+
+		return ret1;
+	}
+	// 2048, 2560, 3072, 3584
 
 	tsd_t *tsd = tsd_get(false);
 	if (unlikely(!tsd || !tsd_fast(tsd) || (size > SC_LOOKUP_MAXCLASS))) {
@@ -2854,6 +2946,38 @@ JEMALLOC_EXPORT void JEMALLOC_NOTHROW
 je_free(void *ptr) {
 	LOG("core.free.entry", "ptr: %p", ptr);
 
+	if (0 &&
+	    ptr >= buf_start && ptr <= buf_end) {
+		if (!ptr) return;
+		char *filled = *(void **)(ptr + safe_sz - sizeof(void *));
+		for (unsigned i = 0; i < safe_sz; i++) {
+			if (filled[i] != 'X') abort(); // never happens
+		}
+
+		ptr = filled;
+	}
+	if ((uintptr_t)ptr >= lowest && (uintptr_t)ptr <= highest) {
+		tsd_t *tsd = tsd_get(false);
+		malloc_mutex_lock(tsd_tsdn(tsd), &pad_mtx);
+		for (unsigned i = 0 ; i < nalloc; i++) {
+			if (ptr == ptrs[i]) {
+				ptrs[i] = NULL;
+				ptr -= PAD_BEFORE;
+				if (PAD_BEFORE >= PAGE) {
+					mprotect_tsd(ptr, PAD_BEFORE, PROT_WRITE);
+				} else {
+					// for (unsigned i = 0; i < PAD_BEFORE; i++) {
+					// 	if (((char *)ptr)[i] != 'x') {
+					// 		abort(); // never happens
+					// 	}
+					// }
+				}
+				break;
+			}
+		}
+		malloc_mutex_unlock(tsd_tsdn(tsd), &pad_mtx);
+	}
+	
 	if (!free_fastpath(ptr, 0, false)) {
 		free_default(ptr);
 	}
