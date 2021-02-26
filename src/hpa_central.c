@@ -91,7 +91,7 @@ label_success:
 	 */
 	assert(edata_state_get(edata) == extent_state_dirty);
 	assert(edata_base_get(edata) == edata_addr_get(edata));
-	edata_state_set(edata, extent_state_active);
+	extent_state_update(tsdn, central->emap, edata, extent_state_active);
 	return edata;
 }
 
@@ -136,7 +136,7 @@ hpa_central_alloc_grow(tsdn_t *tsdn, hpa_central_t *central,
 	edata_sn_set(edata, sn);
 	edata_sn_set(trail, sn);
 
-	edata_state_set(trail, extent_state_dirty);
+	extent_state_update(tsdn, central->emap, trail, extent_state_dirty);
 	eset_insert(&central->eset, trail);
 	return false;
 }
@@ -203,6 +203,6 @@ hpa_central_dalloc(tsdn_t *tsdn, hpa_central_t *central, edata_t *edata) {
 		eset_remove(&central->eset, trail);
 		hpa_central_dalloc_merge(tsdn, central, edata, trail);
 	}
-	edata_state_set(edata, extent_state_dirty);
+	extent_state_update(tsdn, central->emap, edata, extent_state_dirty);
 	eset_insert(&central->eset, edata);
 }

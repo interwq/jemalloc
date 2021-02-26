@@ -46,6 +46,7 @@ struct rtree_node_elm_s {
 typedef struct rtree_metadata_s rtree_metadata_t;
 struct rtree_metadata_s {
 	szind_t szind;
+	extent_state_t state; /* Mirrors edata->state. */
 	bool is_head; /* Mirrors edata->is_head. */
 	bool slab;
 };
@@ -55,6 +56,10 @@ struct rtree_contents_s {
 	edata_t *edata;
 	rtree_metadata_t metadata;
 };
+
+#define RTREE_LEAF_STATE_WIDTH 4
+#define RTREE_LEAF_STATE_SHIFT 2
+#define RTREE_LEAF_STATE_MASK MASK(RTREE_LEAF_STATE_WIDTH, RTREE_LEAF_STATE_SHIFT)
 
 struct rtree_leaf_elm_s {
 #ifdef RTREE_LEAF_COMPACT
@@ -66,17 +71,17 @@ struct rtree_leaf_elm_s {
 	 *
 	 * x: index
 	 * e: edata
+	 * s: state
 	 * h: is_head
 	 * b: slab
 	 *
-	 *   00000000 xxxxxxxx eeeeeeee [...] eeeeeeee eeee00hb
+	 *   00000000 xxxxxxxx eeeeeeee [...] eeeeeeee eesssshb
 	 */
 	atomic_p_t	le_bits;
 #else
 	atomic_p_t	le_edata; /* (edata_t *) */
 	/*
-	 * slab is stored in the low bit; szind is stored in the next lowest
-	 * bits.
+	 * From low to high bits: slab, is_head, state.
 	 */
 	atomic_u_t	le_metadata;
 #endif
@@ -192,7 +197,10 @@ rtree_leaf_elm_bits_encode(rtree_contents_t contents) {
 	 */
 	uintptr_t slab_bits = (uintptr_t)contents.metadata.slab;
 	uintptr_t is_head_bits = (uintptr_t)contents.metadata.is_head << 1;
-	uintptr_t metadata_bits = szind_bits | is_head_bits | slab_bits;
+	uintptr_t state_bits = (uintptr_t)contents.metadata.state <<
+	    RTREE_LEAF_STATE_SHIFT;
+	uintptr_t metadata_bits = szind_bits | state_bits | is_head_bits |
+	    slab_bits;
 	assert((edata_bits & metadata_bits) == 0);
 
 	return edata_bits | metadata_bits;
@@ -206,7 +214,11 @@ rtree_leaf_elm_bits_decode(uintptr_t bits) {
 	contents.metadata.slab = (bool)(bits & 1);
 	contents.metadata.is_head = (bool)(bits & (1 << 1));
 
-	uintptr_t metadata_mask = ~((uintptr_t)((1 << 2) - 1));
+	uintptr_t state_bits = (bits & RTREE_LEAF_STATE_MASK) >>
+	    RTREE_LEAF_STATE_SHIFT;
+	contents.metadata.state = (extent_state_t)state_bits;
+
+	uintptr_t low_bit_mask = ~((uintptr_t)EDATA_ALIGNMENT - 1);
 #    ifdef __aarch64__
 	/*
 	 * aarch64 doesn't sign extend the highest virtual address bit to set
@@ -214,13 +226,12 @@ rtree_leaf_elm_bits_decode(uintptr_t bits) {
 	 */
 	uintptr_t high_bit_mask = ((uintptr_t)1 << LG_VADDR) - 1;
 	/* Mask off metadata. */
-	uintptr_t low_bit_mask = metadata_mask;
 	uintptr_t mask = high_bit_mask & low_bit_mask;
 	contents.edata = (edata_t *)(bits & mask);
 #    else
 	/* Restore sign-extended high bits, mask metadata bits. */
 	contents.edata = (edata_t *)((uintptr_t)((intptr_t)(bits << RTREE_NHIB)
-	    >> RTREE_NHIB) & metadata_mask);
+	    >> RTREE_NHIB) & low_bit_mask);
 #    endif
 	return contents;
 }
@@ -240,7 +251,12 @@ rtree_leaf_elm_read(tsdn_t *tsdn, rtree_t *rtree, rtree_leaf_elm_t *elm,
 	    ? ATOMIC_RELAXED : ATOMIC_ACQUIRE);
 	contents.metadata.slab = (bool)(metadata_bits & 1);
 	contents.metadata.is_head = (bool)(metadata_bits & (1 << 1));
-	contents.metadata.szind = (metadata_bits >> 2);
+
+	uintptr_t state_bits = (metadata_bits & RTREE_LEAF_STATE_MASK) >>
+	    RTREE_LEAF_STATE_SHIFT;
+	contents.metadata.state = (extent_state_t)state_bits;
+	contents.metadata.szind = metadata_bits >> (RTREE_LEAF_STATE_SHIFT +
+	    RTREE_LEAF_STATE_WIDTH);
 
 	contents.edata = (edata_t *)atomic_load_p(&elm->le_edata, dependent
 	    ? ATOMIC_RELAXED : ATOMIC_ACQUIRE);
@@ -256,9 +272,11 @@ rtree_leaf_elm_write(tsdn_t *tsdn, rtree_t *rtree,
 	uintptr_t bits = rtree_leaf_elm_bits_encode(contents);
 	atomic_store_p(&elm->le_bits, (void *)bits, ATOMIC_RELEASE);
 #else
-	unsigned metadata_bits = ((unsigned)contents.metadata.slab
+	unsigned metadata_bits = (unsigned)contents.metadata.slab
 	    | ((unsigned)contents.metadata.is_head << 1)
-	    | ((unsigned)contents.metadata.szind << 2));
+	    | ((unsigned)contents.metadata.state << RTREE_LEAF_STATE_SHIFT)
+	    | ((unsigned)contents.metadata.szind << (RTREE_LEAF_STATE_SHIFT +
+	    RTREE_LEAF_STATE_WIDTH));
 	atomic_store_u(&elm->le_metadata, metadata_bits, ATOMIC_RELEASE);
 	/*
 	 * Write edata last, since the element is atomically considered valid
@@ -430,6 +448,7 @@ rtree_clear(tsdn_t *tsdn, rtree_t *rtree, rtree_ctx_t *rtree_ctx,
 	contents.metadata.szind = SC_NSIZES;
 	contents.metadata.slab = false;
 	contents.metadata.is_head = false;
+	contents.metadata.state = (extent_state_t)0;
 	rtree_leaf_elm_write(tsdn, rtree, elm, contents);
 }
 
