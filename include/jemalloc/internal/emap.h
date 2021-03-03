@@ -139,6 +139,8 @@ emap_assert_not_mapped(tsdn_t *tsdn, emap_t *emap, edata_t *edata) {
 static inline void
 rtree_edata_state_update(tsdn_t *tsdn, rtree_t *rtree, edata_t *edata,
     uintptr_t addr, extent_state_t state) {
+	witness_assert_not_lockless(tsdn_witness_tsdp_get(tsdn));
+
 	rtree_ctx_t rtree_ctx_fallback;
 	rtree_ctx_t *rtree_ctx = tsdn_rtree_ctx(tsdn, &rtree_ctx_fallback);
 
