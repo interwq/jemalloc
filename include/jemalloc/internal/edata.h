@@ -17,7 +17,7 @@
  * sizeof(edata_t) is 128 bytes on 64-bit architectures.  Ensure the alignment
  * to free up the low bits in the rtree leaf.
  */
-#define EDATA_ALIGNMENT 64
+#define EDATA_ALIGNMENT 128
 
 enum extent_state_e {
 	extent_state_active   = 0,

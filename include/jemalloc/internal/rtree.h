@@ -75,7 +75,7 @@ struct rtree_leaf_elm_s {
 	 * h: is_head
 	 * b: slab
 	 *
-	 *   00000000 xxxxxxxx eeeeeeee [...] eeeeeeee eesssshb
+	 *   00000000 xxxxxxxx eeeeeeee [...] eeeeeeee e0sssshb
 	 */
 	atomic_p_t	le_bits;
 #else
@@ -189,12 +189,8 @@ JEMALLOC_ALWAYS_INLINE uintptr_t
 rtree_leaf_elm_bits_encode(rtree_contents_t contents) {
 	uintptr_t edata_bits = (uintptr_t)contents.edata
 	    & (((uintptr_t)1 << LG_VADDR) - 1);
+
 	uintptr_t szind_bits = (uintptr_t)contents.metadata.szind << LG_VADDR;
-	/*
-	 * Metadata shares the low bits of edata. edata is CACHELINE aligned (in
-	 * fact, it's 128 bytes on 64-bit systems); we can enforce this
-	 * alignment if we want to steal the extra rtree leaf bits someday.
-	 */
 	uintptr_t slab_bits = (uintptr_t)contents.metadata.slab;
 	uintptr_t is_head_bits = (uintptr_t)contents.metadata.is_head << 1;
 	uintptr_t state_bits = (uintptr_t)contents.metadata.state <<
@@ -268,6 +264,7 @@ rtree_leaf_elm_read(tsdn_t *tsdn, rtree_t *rtree, rtree_leaf_elm_t *elm,
 static inline void
 rtree_leaf_elm_write(tsdn_t *tsdn, rtree_t *rtree,
     rtree_leaf_elm_t *elm, rtree_contents_t contents) {
+	assert((uintptr_t)contents.edata % EDATA_ALIGNMENT == 0);
 #ifdef RTREE_LEAF_COMPACT
 	uintptr_t bits = rtree_leaf_elm_bits_encode(contents);
 	atomic_store_p(&elm->le_bits, (void *)bits, ATOMIC_RELEASE);

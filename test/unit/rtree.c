@@ -32,7 +32,7 @@ TEST_END
 #undef NITERS
 #undef SEED
 
-JEMALLOC_ATTR(aligned(128)) edata_t edata_a = {0}, edata_b = {0},
+JEMALLOC_ALIGNED(EDATA_ALIGNMENT) edata_t edata_a = {0}, edata_b = {0},
     edata_c = {0}, edata_d = {0};
 
 TEST_BEGIN(test_rtree_extrema) {
