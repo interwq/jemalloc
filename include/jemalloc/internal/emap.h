@@ -5,6 +5,15 @@
 #include "jemalloc/internal/mutex_pool.h"
 #include "jemalloc/internal/rtree.h"
 
+/*
+ * Note: Ends without at semicolon, so that
+ *     EMAP_DECLARE_RTREE_CTX;
+ * in uses will avoid empty-statement warnings.
+ */
+#define EMAP_DECLARE_RTREE_CTX						\
+    rtree_ctx_t rtree_ctx_fallback;					\
+    rtree_ctx_t *rtree_ctx = tsdn_rtree_ctx(tsdn, &rtree_ctx_fallback)
+
 typedef struct emap_s emap_t;
 struct emap_s {
 	rtree_t rtree;
@@ -31,20 +40,13 @@ bool emap_init(emap_t *emap, base_t *base, bool zeroed);
 void emap_remap(tsdn_t *tsdn, emap_t *emap, edata_t *edata, szind_t szind,
     bool slab);
 
-/*
- * Grab the lock or locks associated with the edata or edatas indicated (which
- * is done just by simple address hashing).  The hashing strategy means that
- * it's never safe to grab locks incrementally -- you have to grab all the locks
- * you'll need at once, and release them all at once.
- */
-void emap_lock_edata(tsdn_t *tsdn, emap_t *emap, edata_t *edata);
-void emap_unlock_edata(tsdn_t *tsdn, emap_t *emap, edata_t *edata);
-void emap_lock_edata2(tsdn_t *tsdn, emap_t *emap, edata_t *edata1,
-    edata_t *edata2);
-void emap_unlock_edata2(tsdn_t *tsdn, emap_t *emap, edata_t *edata1,
-    edata_t *edata2);
-edata_t *emap_lock_edata_from_addr(tsdn_t *tsdn, emap_t *emap, void *addr,
-    bool inactive_only);
+edata_t *emap_try_acquire_edata(tsdn_t *tsdn, emap_t *emap, void *addr,
+    extent_state_t expected_state, bool allow_head_extent);
+edata_t *emap_try_acquire_edata_neighbor(tsdn_t *tsdn, emap_t *emap,
+    edata_t *edata, extent_pai_t pai, extent_state_t expected_state,
+    bool forward);
+void emap_release_edata(tsdn_t *tsdn, emap_t *emap, edata_t *edata,
+    extent_state_t new_state);
 
 /*
  * Associate the given edata with its beginning and end address, setting the
@@ -136,41 +138,77 @@ emap_assert_not_mapped(tsdn_t *tsdn, emap_t *emap, edata_t *edata) {
 	}
 }
 
+static inline bool
+emap_edata_in_transition(tsdn_t *tsdn, emap_t *emap, edata_t *edata) {
+	emap_assert_mapped(tsdn, emap, edata);
+
+	EMAP_DECLARE_RTREE_CTX;
+	rtree_contents_t contents = rtree_read(tsdn, &emap->rtree, rtree_ctx,
+	    (uintptr_t)edata_base_get(edata));
+
+	return edata_state_in_transition(contents.metadata.state);
+}
+
 static inline void
-rtree_edata_state_update(tsdn_t *tsdn, rtree_t *rtree, edata_t *edata,
-    uintptr_t addr, extent_state_t state) {
-	witness_assert_not_lockless(tsdn_witness_tsdp_get(tsdn));
+emap_edata_assert_acquired(tsdn_t *tsdn, emap_t *emap, edata_t *edata) {
+	if (!config_debug) {
+		return;
+	}
 
-	rtree_ctx_t rtree_ctx_fallback;
-	rtree_ctx_t *rtree_ctx = tsdn_rtree_ctx(tsdn, &rtree_ctx_fallback);
+	EMAP_DECLARE_RTREE_CTX;
+	rtree_contents_t contents = rtree_read(tsdn, &emap->rtree, rtree_ctx,
+	    (uintptr_t)edata_base_get(edata));
 
-	rtree_leaf_elm_t *elm = rtree_leaf_elm_lookup(tsdn, rtree, rtree_ctx,
-	    addr, /* dependent */ true, /* init_missing */ false);
-	assert(elm != NULL);
-	rtree_contents_t contents = rtree_leaf_elm_read(tsdn, rtree, elm,
-	    /* dependent */ true);
-	assert(contents.edata == edata);
-	contents.metadata.state = state;
-	rtree_leaf_elm_write(tsdn, rtree, elm, contents);
+	/*
+	 * The edata is considered acquired if no other threads will attempt to
+	 * read / write any fields from it.  This includes a few cases:
+	 *
+	 * 1) edata not hooked into emap yet -- This implies the edata just got
+	 * allocated or initialized.
+	 *
+	 * 2) in an active or transition state -- In both cases, the edata can
+	 * be discovered from the emap, however the state tracked in the rtree
+	 * will prevent other threads from accessing the actual edata.
+	 */
+	assert(contents.edata == NULL ||
+	    contents.metadata.state == extent_state_active ||
+	    emap_edata_in_transition(tsdn, emap, edata));
+}
+
+static inline void
+extent_assert_can_coalesce(const edata_t *inner, const edata_t *outer) {
+	assert(edata_arena_ind_get(inner) == edata_arena_ind_get(outer));
+	assert(edata_pai_get(inner) == edata_pai_get(outer));
+	assert(edata_committed_get(inner) == edata_committed_get(outer));
+	assert(edata_state_get(inner) == extent_state_active);
+	assert(edata_state_get(outer) == extent_state_merging);
 }
 
 static inline void
 extent_state_update(tsdn_t *tsdn, emap_t *emap, edata_t *edata,
     extent_state_t state) {
+	witness_assert_not_lockless(tsdn_witness_tsdp_get(tsdn));
+
 	edata_state_set(edata, state);
 
-	rtree_edata_state_update(tsdn, &emap->rtree, edata,
-	    (uintptr_t)edata_base_get(edata), state);
-	rtree_edata_state_update(tsdn, &emap->rtree, edata,
-	    (uintptr_t)edata_last_get(edata), state);
+	EMAP_DECLARE_RTREE_CTX;
+	rtree_leaf_elm_t *elm1 = rtree_leaf_elm_lookup(tsdn, &emap->rtree,
+	    rtree_ctx, (uintptr_t)edata_base_get(edata), /* dependent */ true,
+	    /* init_missing */ false);
+	assert(elm1 != NULL);
+	rtree_leaf_elm_t *elm2 = rtree_leaf_elm_lookup(tsdn, &emap->rtree,
+	    rtree_ctx, (uintptr_t)edata_last_get(edata), /* dependent */ true,
+	    /* init_missing */ false);
+	assert(elm2 != NULL);
+
+	rtree_leaf_elm_state_update(tsdn, &emap->rtree, elm1, elm2, state);
 
 	emap_assert_mapped(tsdn, emap, edata);
 }
 
 JEMALLOC_ALWAYS_INLINE edata_t *
 emap_edata_lookup(tsdn_t *tsdn, emap_t *emap, const void *ptr) {
-	rtree_ctx_t rtree_ctx_fallback;
-	rtree_ctx_t *rtree_ctx = tsdn_rtree_ctx(tsdn, &rtree_ctx_fallback);
+	EMAP_DECLARE_RTREE_CTX;
 
 	return rtree_read(tsdn, &emap->rtree, rtree_ctx, (uintptr_t)ptr).edata;
 }
@@ -179,8 +217,7 @@ emap_edata_lookup(tsdn_t *tsdn, emap_t *emap, const void *ptr) {
 JEMALLOC_ALWAYS_INLINE void
 emap_alloc_ctx_lookup(tsdn_t *tsdn, emap_t *emap, const void *ptr,
     emap_alloc_ctx_t *alloc_ctx) {
-	rtree_ctx_t rtree_ctx_fallback;
-	rtree_ctx_t *rtree_ctx = tsdn_rtree_ctx(tsdn, &rtree_ctx_fallback);
+	EMAP_DECLARE_RTREE_CTX;
 
 	rtree_metadata_t metadata = rtree_metadata_read(tsdn, &emap->rtree,
 	    rtree_ctx, (uintptr_t)ptr);
@@ -192,8 +229,7 @@ emap_alloc_ctx_lookup(tsdn_t *tsdn, emap_t *emap, const void *ptr,
 JEMALLOC_ALWAYS_INLINE void
 emap_full_alloc_ctx_lookup(tsdn_t *tsdn, emap_t *emap, const void *ptr,
     emap_full_alloc_ctx_t *full_alloc_ctx) {
-	rtree_ctx_t rtree_ctx_fallback;
-	rtree_ctx_t *rtree_ctx = tsdn_rtree_ctx(tsdn, &rtree_ctx_fallback);
+	EMAP_DECLARE_RTREE_CTX;
 
 	rtree_contents_t contents = rtree_read(tsdn, &emap->rtree, rtree_ctx,
 	    (uintptr_t)ptr);
@@ -210,8 +246,7 @@ emap_full_alloc_ctx_lookup(tsdn_t *tsdn, emap_t *emap, const void *ptr,
 JEMALLOC_ALWAYS_INLINE bool
 emap_full_alloc_ctx_try_lookup(tsdn_t *tsdn, emap_t *emap, const void *ptr,
     emap_full_alloc_ctx_t *full_alloc_ctx) {
-	rtree_ctx_t rtree_ctx_fallback;
-	rtree_ctx_t *rtree_ctx = tsdn_rtree_ctx(tsdn, &rtree_ctx_fallback);
+	EMAP_DECLARE_RTREE_CTX;
 
 	rtree_contents_t contents;
 	bool err = rtree_read_independent(tsdn, &emap->rtree, rtree_ctx,

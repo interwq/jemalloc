@@ -158,6 +158,7 @@ pac_expand_impl(tsdn_t *tsdn, pai_t *self, edata_t *edata, size_t old_size,
 	if (trail == NULL) {
 		return true;
 	}
+	/////
 	if (extent_merge_wrapper(tsdn, pac, ehooks, edata, trail)) {
 		extent_dalloc_wrapper(tsdn, pac, ehooks, trail);
 		return true;

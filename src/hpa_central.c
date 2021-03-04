@@ -33,15 +33,16 @@ hpa_central_split(tsdn_t *tsdn, hpa_central_t *central, edata_t *edata,
 	emap_prepare_t prepare;
 	bool err = emap_split_prepare(tsdn, central->emap, &prepare, edata,
 	    size, trail, cursize - size);
+	assert(edata_state_get(edata) == edata_state_get(trail));
 	if (err) {
 		edata_cache_small_put(tsdn, &central->ecs, trail);
 		return NULL;
 	}
-	emap_lock_edata2(tsdn, central->emap, edata, trail);
+	assert(edata_state_get(edata) == edata_state_get(trail));
+
 	edata_size_set(edata, size);
 	emap_split_commit(tsdn, central->emap, &prepare, edata, size, trail,
 	    cursize - size);
-	emap_unlock_edata2(tsdn, central->emap, edata, trail);
 
 	return trail;
 }
@@ -141,38 +142,17 @@ hpa_central_alloc_grow(tsdn_t *tsdn, hpa_central_t *central,
 	return false;
 }
 
-static edata_t *
-hpa_central_dalloc_get_merge_candidate(tsdn_t *tsdn, hpa_central_t *central,
-    void *addr) {
-	edata_t *edata = emap_lock_edata_from_addr(tsdn, central->emap, addr,
-	    /* inactive_only */ true);
-	if (edata == NULL) {
-		return NULL;
-	}
-	extent_pai_t pai = edata_pai_get(edata);
-	extent_state_t state = edata_state_get(edata);
-	emap_unlock_edata(tsdn, central->emap, edata);
-
-	if (pai != EXTENT_PAI_HPA) {
-		return NULL;
-	}
-	if (state == extent_state_active) {
-		return NULL;
-	}
-
-	return edata;
-}
-
 /* Merges b into a, freeing b back to the edata cache.. */
 static void
 hpa_central_dalloc_merge(tsdn_t *tsdn, hpa_central_t *central, edata_t *a,
     edata_t *b) {
+	emap_edata_assert_acquired(tsdn, central->emap, a);
+	emap_edata_assert_acquired(tsdn, central->emap, b);
+
 	emap_prepare_t prepare;
 	emap_merge_prepare(tsdn, central->emap, &prepare, a, b);
-	emap_lock_edata2(tsdn, central->emap, a, b);
 	edata_size_set(a, edata_size_get(a) + edata_size_get(b));
 	emap_merge_commit(tsdn, central->emap, &prepare, a, b);
-	emap_unlock_edata2(tsdn, central->emap, a, b);
 	edata_cache_small_put(tsdn, &central->ecs, b);
 }
 
@@ -188,21 +168,24 @@ hpa_central_dalloc(tsdn_t *tsdn, hpa_central_t *central, edata_t *edata) {
 	edata_addr_set(edata, edata_base_get(edata));
 	edata_zeroed_set(edata, false);
 
-	if (!edata_is_head_get(edata)) {
-		edata_t *lead = hpa_central_dalloc_get_merge_candidate(tsdn,
-		    central, edata_before_get(edata));
-		if (lead != NULL) {
-			eset_remove(&central->eset, lead);
-			hpa_central_dalloc_merge(tsdn, central, lead, edata);
-			edata = lead;
-		}
-	}
-	edata_t *trail = hpa_central_dalloc_get_merge_candidate(tsdn, central,
-	    edata_past_get(edata));
-	if (trail != NULL && !edata_is_head_get(trail)) {
+	/*
+	 *  Merge forward first, so that the original *edata stays active state
+	 *  for the second acquire (only necessary for sanity checking).
+	 */
+	edata_t *trail = emap_try_acquire_edata_neighbor(tsdn, central->emap,
+	    edata, EXTENT_PAI_HPA, extent_state_dirty, true /* forward */);
+	if (trail != NULL) {
 		eset_remove(&central->eset, trail);
 		hpa_central_dalloc_merge(tsdn, central, edata, trail);
 	}
+	edata_t *lead = emap_try_acquire_edata_neighbor(tsdn, central->emap,
+	    edata, EXTENT_PAI_HPA, extent_state_dirty, false /* forward */);
+	if (lead != NULL) {
+		eset_remove(&central->eset, lead);
+		hpa_central_dalloc_merge(tsdn, central, lead, edata);
+		edata = lead;
+	}
+
 	extent_state_update(tsdn, central->emap, edata, extent_state_dirty);
 	eset_insert(&central->eset, edata);
 }
