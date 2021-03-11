@@ -40,11 +40,11 @@ bool emap_init(emap_t *emap, base_t *base, bool zeroed);
 void emap_remap(tsdn_t *tsdn, emap_t *emap, edata_t *edata, szind_t szind,
     bool slab);
 
-edata_t *emap_try_acquire_edata(tsdn_t *tsdn, emap_t *emap, void *addr,
-    extent_state_t expected_state, bool allow_head_extent);
 edata_t *emap_try_acquire_edata_neighbor(tsdn_t *tsdn, emap_t *emap,
     edata_t *edata, extent_pai_t pai, extent_state_t expected_state,
     bool forward);
+edata_t *emap_try_acquire_edata_neighbor_expand(tsdn_t *tsdn, emap_t *emap,
+    edata_t *edata, extent_pai_t pai, extent_state_t expected_state);
 void emap_release_edata(tsdn_t *tsdn, emap_t *emap, edata_t *edata,
     extent_state_t new_state);
 
@@ -182,6 +182,17 @@ extent_assert_can_coalesce(const edata_t *inner, const edata_t *outer) {
 	assert(edata_committed_get(inner) == edata_committed_get(outer));
 	assert(edata_state_get(inner) == extent_state_active);
 	assert(edata_state_get(outer) == extent_state_merging);
+	assert(edata_base_get(inner) == edata_past_get(outer) ||
+	    edata_base_get(outer) == edata_past_get(inner));
+}
+
+static inline void
+extent_assert_can_expand(const edata_t *original, const edata_t *expand) {
+	assert(edata_arena_ind_get(original) == edata_arena_ind_get(expand));
+	assert(edata_pai_get(original) == edata_pai_get(expand));
+	assert(edata_state_get(original) == extent_state_active);
+	assert(edata_state_get(expand) == extent_state_merging);
+	assert(edata_past_get(original) == edata_base_get(expand));
 }
 
 static inline void
