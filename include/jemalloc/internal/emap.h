@@ -195,6 +195,26 @@ extent_assert_can_expand(const edata_t *original, const edata_t *expand) {
 	assert(edata_past_get(original) == edata_base_get(expand));
 }
 
+static inline bool
+edata_neighbor_head_state_mergeable(bool edata_is_head,
+    bool neighbor_is_head, bool forward) {
+	/*
+	 * Head states checking: disallow merging if the higher addr extent is a
+	 * head extent.  This helps preserve first-fit, and more importantly
+	 * makes sure no merge across arenas.
+	 */
+	if (forward) {
+		if (neighbor_is_head) {
+			return false;
+		}
+	} else {
+		if (edata_is_head) {
+			return false;
+		}
+	}
+	return true;
+}
+
 static inline void
 extent_state_update(tsdn_t *tsdn, emap_t *emap, edata_t *edata,
     extent_state_t state) {
